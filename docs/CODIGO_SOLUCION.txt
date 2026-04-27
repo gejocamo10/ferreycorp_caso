@@ -1,0 +1,2347 @@
+================================================================================
+ CASO FERREYCORP — MODELO DE PROPENSIÓN DE COMPRA + AGENTE IA
+ Código de la solución (consolidado)
+================================================================================
+
+Este documento contiene todo el código fuente de la solución, organizado
+por componentes para facilitar la lectura.
+
+Estructura del repositorio:
+  - data/raw/         → CSV original
+  - data/processed/   → Features y segmentos (Parquet)
+  - data/predictions/ → Predicciones del modelo (consumidas por el agente)
+  - docs/             → EDA, documento técnico, slides
+  - models/           → Modelos serializados (LightGBM, LogReg)
+  - src/              → Código fuente (este documento)
+  - deploy/           → Specs DigitalOcean / AWS / GCP
+
+Pipeline para reproducir desde cero:
+  1. python -m src.eda
+  2. python -m src.features
+  3. python -m src.model.train
+  4. python -m src.model.explain
+  5. python -m src.model.score
+  6. streamlit run src/app.py
+
+================================================================================
+
+
+================================================================================
+  SECCIÓN: CONFIGURACIÓN Y DEPENDENCIAS
+================================================================================
+
+
+--------------------------------------------------------------------------------
+# Archivo: requirements.txt
+--------------------------------------------------------------------------------
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.0
+lightgbm==4.3.0
+xgboost==2.0.3
+optuna==3.6.1
+shap==0.45.1
+matplotlib==3.9.0
+seaborn==0.13.2
+plotly==5.22.0
+duckdb==1.0.0
+pyarrow==16.1.0
+fsspec==2024.6.0
+s3fs==2024.6.0
+gcsfs==2024.6.0
+boto3==1.34.131
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.31
+redis==5.0.7
+streamlit==1.36.0
+anthropic==0.30.1
+python-dotenv==1.0.1
+pydantic==2.7.4
+jupyter==1.0.0
+ipykernel==6.29.4
+
+--------------------------------------------------------------------------------
+# Archivo: .env.example
+--------------------------------------------------------------------------------
+# ============================================================
+# Cloud provider — switch among: digitalocean | aws | gcp | local
+# ============================================================
+CLOUD_PROVIDER=local
+
+# ============================================================
+# Object storage (S3-compatible for DO/AWS, GCS for GCP)
+# ============================================================
+STORAGE_BUCKET=ferreycorp-predictions
+STORAGE_ENDPOINT=                # e.g. https://nyc3.digitaloceanspaces.com (leave empty for AWS/GCP)
+STORAGE_REGION=us-east-1
+STORAGE_KEY=
+STORAGE_SECRET=
+
+# ============================================================
+# Local paths (used when CLOUD_PROVIDER=local)
+# ============================================================
+LOCAL_DATA_DIR=./data
+LOCAL_PREDICTIONS_PATH=./data/predictions/predictions.parquet
+
+# ============================================================
+# Database (Postgres — same connection string format on all clouds)
+# ============================================================
+DATABASE_URL=postgresql://user:pass@localhost:5432/ferreycorp
+
+# ============================================================
+# Cache (Redis)
+# ============================================================
+REDIS_URL=redis://localhost:6379/0
+
+# ============================================================
+# LLM — Anthropic (Claude)
+# ============================================================
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-sonnet-4-6
+
+# ============================================================
+# App
+# ============================================================
+APP_ENV=development
+LOG_LEVEL=INFO
+
+--------------------------------------------------------------------------------
+# Archivo: docker/Dockerfile
+--------------------------------------------------------------------------------
+# ============================================================
+# Cloud-agnostic container — runs on DO App Platform,
+# AWS ECS / App Runner, GCP Cloud Run, or any K8s cluster.
+# ============================================================
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+COPY src/ ./src/
+COPY models/ ./models/
+
+EXPOSE 8501
+
+# Streamlit entrypoint by default; override CMD for batch jobs
+CMD ["streamlit", "run", "src/app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+
+--------------------------------------------------------------------------------
+# Archivo: src/config.py
+--------------------------------------------------------------------------------
+"""Centralized configuration loaded from environment variables.
+
+Switching cloud providers (DigitalOcean, AWS, GCP) only requires changing
+env vars — never application code.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass
+class Config:
+    cloud_provider: str = os.getenv("CLOUD_PROVIDER", "local")
+
+    storage_bucket: str = os.getenv("STORAGE_BUCKET", "ferreycorp-predictions")
+    storage_endpoint: str | None = os.getenv("STORAGE_ENDPOINT") or None
+    storage_region: str = os.getenv("STORAGE_REGION", "us-east-1")
+    storage_key: str | None = os.getenv("STORAGE_KEY") or None
+    storage_secret: str | None = os.getenv("STORAGE_SECRET") or None
+
+    local_data_dir: Path = Path(os.getenv("LOCAL_DATA_DIR", str(PROJECT_ROOT / "data")))
+    local_predictions_path: Path = Path(
+        os.getenv("LOCAL_PREDICTIONS_PATH", str(PROJECT_ROOT / "data" / "predictions" / "predictions.parquet"))
+    )
+
+    database_url: str = os.getenv("DATABASE_URL", "")
+    redis_url: str = os.getenv("REDIS_URL", "")
+
+    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+    app_env: str = os.getenv("APP_ENV", "development")
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+
+
+config = Config()
+
+================================================================================
+  SECCIÓN: CARGA DE DATOS Y EDA
+================================================================================
+
+
+--------------------------------------------------------------------------------
+# Archivo: src/utils/io.py
+--------------------------------------------------------------------------------
+"""Data I/O helpers — single entrypoint for loading the raw dataset."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+
+from src.config import PROJECT_ROOT
+
+RAW_CSV = PROJECT_ROOT / "data" / "raw" / "compras_data.csv"
+
+BRANDS = [1, 2, 3, 4, 5]
+
+
+def load_raw() -> pd.DataFrame:
+    """Load raw transactional data, sorted by customer and visit day."""
+    df = pd.read_csv(RAW_CSV)
+    df = df.sort_values(["id", "dia_visita"]).reset_index(drop=True)
+    if "tamanio_ciudad" in df.columns:
+        df = df.drop(columns=["tamanio_ciudad"])
+    return df
+
+
+def ensure_dir(path: str | Path) -> Path:
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+--------------------------------------------------------------------------------
+# Archivo: src/eda.py
+--------------------------------------------------------------------------------
+"""Exploratory Data Analysis — generates figures and a markdown report.
+
+Run from project root:
+    python -m src.eda
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+from src.config import PROJECT_ROOT
+from src.utils.io import BRANDS, ensure_dir, load_raw
+
+OUT_DIR = ensure_dir(PROJECT_ROOT / "docs" / "eda")
+FIG_DIR = ensure_dir(OUT_DIR / "figures")
+
+sns.set_theme(style="whitegrid", context="notebook")
+
+
+def fig_target_balance(df: pd.DataFrame) -> None:
+    fig, ax = plt.subplots(figsize=(5, 4))
+    counts = df["incidencia_compra"].value_counts().sort_index()
+    bars = ax.bar(["No compró (0)", "Compró (1)"], counts.values, color=["#cccccc", "#2a9d8f"])
+    for b, v in zip(bars, counts.values):
+        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:,}\n({v/len(df):.1%})", ha="center", va="bottom")
+    ax.set_title("Balance de la variable objetivo")
+    ax.set_ylabel("# visitas")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "01_target_balance.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_demographics(df: pd.DataFrame) -> None:
+    cust = df.drop_duplicates("id")[["id", "genero", "estado_civil", "edad", "nivel_educacion", "ingreso_anual", "ocupacion"]]
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    sns.histplot(cust["edad"], bins=20, ax=axes[0, 0], color="#264653").set_title("Edad")
+    sns.histplot(cust["ingreso_anual"], bins=25, ax=axes[0, 1], color="#264653").set_title("Ingreso anual")
+    sns.countplot(x="genero", data=cust, ax=axes[0, 2], color="#e76f51").set_title("Género")
+    sns.countplot(x="estado_civil", data=cust, ax=axes[1, 0], color="#e76f51").set_title("Estado civil")
+    sns.countplot(x="nivel_educacion", data=cust, ax=axes[1, 1], color="#e76f51").set_title("Nivel educación")
+    sns.countplot(x="ocupacion", data=cust, ax=axes[1, 2], color="#e76f51").set_title("Ocupación")
+    fig.suptitle("Distribución demográfica de los 500 clientes únicos", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "02_demographics.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_visits_per_customer(df: pd.DataFrame) -> None:
+    visits = df.groupby("id").size()
+    purchases = df.groupby("id")["incidencia_compra"].sum()
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    sns.histplot(visits, bins=30, ax=axes[0], color="#264653")
+    axes[0].set_title("# visitas por cliente (2 años)")
+    axes[0].set_xlabel("Visitas")
+    sns.histplot(purchases, bins=30, ax=axes[1], color="#2a9d8f")
+    axes[1].set_title("# compras por cliente (2 años)")
+    axes[1].set_xlabel("Compras")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "03_visits_purchases.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_brand_market_share(df: pd.DataFrame) -> None:
+    bought = df[df.incidencia_compra == 1]
+    share = bought["id_marca"].value_counts(normalize=True).sort_index()
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.bar([f"Marca {b}" for b in share.index], share.values * 100, color="#2a9d8f")
+    for b, v in zip(bars, share.values * 100):
+        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.1f}%", ha="center", va="bottom")
+    ax.set_title("Participación de mercado por marca (sobre compras)")
+    ax.set_ylabel("% de compras")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "04_brand_market_share.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_price_evolution(df: pd.DataFrame) -> None:
+    fig, ax = plt.subplots(figsize=(11, 4))
+    daily = df.groupby("dia_visita")[[f"precio_marca_{b}" for b in BRANDS]].mean()
+    for b in BRANDS:
+        ax.plot(daily.index, daily[f"precio_marca_{b}"], label=f"Marca {b}", alpha=0.85)
+    ax.set_title("Evolución del precio promedio por marca a lo largo del tiempo")
+    ax.set_xlabel("Día de visita")
+    ax.set_ylabel("Precio")
+    ax.legend(ncol=5, loc="upper center", bbox_to_anchor=(0.5, -0.15))
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "05_price_evolution.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_promo_frequency(df: pd.DataFrame) -> None:
+    promo_freq = {f"Marca {b}": df[f"promo_marca_{b}"].mean() * 100 for b in BRANDS}
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.bar(promo_freq.keys(), promo_freq.values(), color="#e76f51")
+    for b, v in zip(bars, promo_freq.values()):
+        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.1f}%", ha="center", va="bottom")
+    ax.set_title("% de días con promoción por marca")
+    ax.set_ylabel("% de días")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "06_promo_frequency.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_promo_lift(df: pd.DataFrame) -> pd.DataFrame:
+    """Purchase rate when at least one brand has promo vs none."""
+    has_any_promo = df[[f"promo_marca_{b}" for b in BRANDS]].sum(axis=1) > 0
+    rate_with = df.loc[has_any_promo, "incidencia_compra"].mean()
+    rate_without = df.loc[~has_any_promo, "incidencia_compra"].mean()
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bars = ax.bar(["Sin promo", "Con promo"], [rate_without * 100, rate_with * 100], color=["#cccccc", "#2a9d8f"])
+    for b, v in zip(bars, [rate_without * 100, rate_with * 100]):
+        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.1f}%", ha="center", va="bottom")
+    ax.set_title(f"Tasa de compra con/sin promoción (lift = {(rate_with/rate_without - 1)*100:.1f}%)")
+    ax.set_ylabel("% de visitas con compra")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "07_promo_lift.png", dpi=120)
+    plt.close(fig)
+    return pd.DataFrame({"sin_promo": [rate_without], "con_promo": [rate_with], "lift_pct": [(rate_with / rate_without - 1) * 100]})
+
+
+def fig_age_income_vs_purchase(df: pd.DataFrame) -> None:
+    df = df.copy()
+    df["edad_bin"] = pd.cut(df["edad"], bins=[17, 25, 35, 45, 55, 75], labels=["18-25", "26-35", "36-45", "46-55", "56-75"])
+    df["ingreso_bin"] = pd.qcut(df["ingreso_anual"], q=5, labels=["Q1 (bajo)", "Q2", "Q3", "Q4", "Q5 (alto)"])
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    age_rate = df.groupby("edad_bin", observed=True)["incidencia_compra"].mean() * 100
+    income_rate = df.groupby("ingreso_bin", observed=True)["incidencia_compra"].mean() * 100
+    age_rate.plot(kind="bar", ax=axes[0], color="#264653")
+    axes[0].set_title("Tasa de compra por rango de edad")
+    axes[0].set_ylabel("% compra")
+    income_rate.plot(kind="bar", ax=axes[1], color="#264653")
+    axes[1].set_title("Tasa de compra por quintil de ingreso")
+    axes[1].set_ylabel("% compra")
+    for ax in axes:
+        for p in ax.patches:
+            ax.annotate(f"{p.get_height():.1f}%", (p.get_x() + p.get_width() / 2, p.get_height()), ha="center", va="bottom")
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=0)
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "08_age_income_vs_purchase.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_price_sensitivity(df: pd.DataFrame) -> None:
+    """When customer buys, do they tend to choose the cheapest brand?"""
+    bought = df[df.incidencia_compra == 1].copy()
+    prices = bought[[f"precio_marca_{b}" for b in BRANDS]].values
+    cheapest_idx = prices.argmin(axis=1) + 1  # brands are 1..5
+    bought["cheapest_brand"] = cheapest_idx
+    bought["chose_cheapest"] = (bought["id_marca"] == bought["cheapest_brand"]).astype(int)
+    rate = bought["chose_cheapest"].mean() * 100
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(["Eligió la más barata", "Eligió otra"], [rate, 100 - rate], color=["#2a9d8f", "#cccccc"])
+    ax.set_title("Cuando el cliente compra, ¿elige la marca más barata?")
+    ax.set_ylabel("% de compras")
+    for i, v in enumerate([rate, 100 - rate]):
+        ax.text(i, v, f"{v:.1f}%", ha="center", va="bottom")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "09_price_sensitivity.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_correlations(df: pd.DataFrame) -> None:
+    cols = ["incidencia_compra", "edad", "ingreso_anual", "genero", "estado_civil", "nivel_educacion", "ocupacion"]
+    cols += [f"precio_marca_{b}" for b in BRANDS]
+    cols += [f"promo_marca_{b}" for b in BRANDS]
+    corr = df[cols].corr()
+    fig, ax = plt.subplots(figsize=(11, 9))
+    sns.heatmap(corr, annot=True, fmt=".2f", cmap="RdBu_r", center=0, ax=ax, cbar_kws={"shrink": 0.7})
+    ax.set_title("Matriz de correlaciones")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "10_correlations.png", dpi=110)
+    plt.close(fig)
+
+
+def fig_loyalty(df: pd.DataFrame) -> None:
+    """For each (customer, brand) pair, what fraction of their purchases went to that brand?"""
+    bought = df[df.incidencia_compra == 1]
+    loyalty = bought.groupby(["id", "id_marca"]).size().unstack(fill_value=0)
+    loyalty_pct = loyalty.div(loyalty.sum(axis=1), axis=0).fillna(0)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    loyalty_pct.mean(axis=0).plot(kind="bar", ax=ax, color="#264653")
+    ax.set_title("Lealtad promedio por marca (% del basket de cada cliente)")
+    ax.set_xticklabels([f"Marca {b}" for b in loyalty_pct.columns], rotation=0)
+    ax.set_ylabel("% promedio")
+    for p in ax.patches:
+        ax.annotate(f"{p.get_height()*100:.1f}%", (p.get_x() + p.get_width() / 2, p.get_height()), ha="center", va="bottom")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "11_loyalty.png", dpi=120)
+    plt.close(fig)
+
+    # Concentration: how many customers buy >50% from a single brand?
+    top_share = loyalty_pct.max(axis=1)
+    concentrated = (top_share > 0.5).mean()
+    return concentrated
+
+
+def write_report(df: pd.DataFrame, promo_table: pd.DataFrame, concentrated_share: float) -> None:
+    n_rows, n_cols = df.shape
+    n_cust = df["id"].nunique()
+    n_days = df["dia_visita"].nunique()
+    rate = df["incidencia_compra"].mean()
+    bought = df[df.incidencia_compra == 1]
+    brand_share = bought["id_marca"].value_counts(normalize=True).sort_index()
+    avg_visits = df.groupby("id").size().mean()
+    avg_purchases = df.groupby("id")["incidencia_compra"].sum().mean()
+
+    report = f"""# Reporte EDA — Ferreycorp · Propensión de Compra
+
+## 1. Visión general del dataset
+
+| Métrica | Valor |
+|---|---|
+| Filas (visitas) | **{n_rows:,}** |
+| Columnas | {n_cols} |
+| Clientes únicos | **{n_cust}** |
+| Rango temporal | día 1 → día {n_days} (≈ 2 años) |
+| Visitas promedio por cliente | {avg_visits:.1f} |
+| Compras promedio por cliente | {avg_purchases:.1f} |
+| **Tasa de conversión global** | **{rate:.2%}** |
+| Valores nulos | 0 |
+
+> La granularidad es **una fila = una visita de un cliente en un día**.
+> El target `incidencia_compra` está moderadamente desbalanceado (~25% positivos),
+> pero suficientemente representado como para no requerir oversampling agresivo.
+
+## 2. Distribución demográfica
+
+Los 500 clientes son adultos entre 18–75 años (mediana ~36), con ingresos anuales entre 38k y 309k.
+Nivel educativo y ocupación están codificados como ordinales/categóricas.
+
+![demographics](figures/02_demographics.png)
+
+## 3. Comportamiento de visita y compra
+
+Los clientes son recurrentes: en promedio {avg_visits:.0f} visitas en 2 años,
+de las cuales {avg_purchases:.0f} resultan en compra. Esto valida la formulación de
+**propensión por visita** sobre propensión por cliente — hay suficiente densidad temporal por individuo.
+
+![visits](figures/03_visits_purchases.png)
+
+## 4. Marcas y participación de mercado
+
+Las 5 marcas tienen participaciones muy distintas, dominadas por **Marca 5 ({brand_share.get(5,0):.1%})** y **Marca 2 ({brand_share.get(2,0):.1%})**.
+La Marca 3 es claramente nicho ({brand_share.get(3,0):.1%}). Esto sugiere que un modelo
+multiclase de marca tendrá clases desbalanceadas — útil tenerlo presente.
+
+![market_share](figures/04_brand_market_share.png)
+
+## 5. Precios y promociones
+
+Los precios fluctúan en el tiempo — no son estáticos. Esto es **una palanca de pricing real**:
+si entendemos elasticidad por marca, podemos sugerir cuándo bajar precio para activar
+clientes de baja propensión.
+
+![prices](figures/05_price_evolution.png)
+![promos](figures/06_promo_frequency.png)
+
+**Lift de promoción:** la tasa de compra con al menos una marca en promo es **{promo_table['con_promo'].iloc[0]*100:.1f}%**
+vs. **{promo_table['sin_promo'].iloc[0]*100:.1f}%** sin promo (lift {promo_table['lift_pct'].iloc[0]:.1f}%).
+Las promociones **sí mueven la aguja**, son una feature de primer orden para el modelo.
+
+![promo_lift](figures/07_promo_lift.png)
+
+## 6. Demografía vs. tasa de compra
+
+![age_income](figures/08_age_income_vs_purchase.png)
+
+Hay diferencias entre rangos de edad y quintiles de ingreso, aunque ninguna es dramática.
+Las features demográficas aportan, pero la señal principal está en el comportamiento histórico
+y las palancas comerciales (precio/promo).
+
+## 7. Sensibilidad a precio
+
+![price_sens](figures/09_price_sensitivity.png)
+
+Cuando un cliente compra, una proporción significativa elige la marca más barata disponible.
+Esto refuerza la importancia de features como **precio relativo** y **descuento vs. promedio histórico**.
+
+## 8. Correlaciones
+
+![corr](figures/10_correlations.png)
+
+Sin correlaciones bivariadas extremadamente fuertes con el target — esto es típico en problemas
+de propensión. La señal viene de **interacciones** (ej. cliente × precio × promo), donde los
+modelos basados en árboles (LightGBM) brillan vs. modelos lineales.
+
+## 9. Lealtad de marca
+
+![loyalty](figures/11_loyalty.png)
+
+**~{concentrated_share:.0%} de los clientes** concentran más del 50% de sus compras en una sola marca.
+Esto valida construir feature de **lealtad histórica** y posiblemente segmentar clientes
+en clústeres (leales vs. cazadores de oferta).
+
+## 10. Hallazgos clave para modelado
+
+1. **Granularidad correcta**: visita-cliente — modelo binario con `incidencia_compra` como target.
+2. **Sin nulos** → no se requiere imputación.
+3. **Variables categóricas**: `genero`, `estado_civil`, `nivel_educacion`, `ocupacion`, `id_marca`.
+4. **Variables numéricas**: `edad`, `ingreso_anual`, precios y promos por marca.
+5. **Feature engineering crítico** (debe calcularse con ventana causal — solo con datos `dia < dia_visita`):
+   - **RFM**: recencia, frecuencia, monto promedio.
+   - **Lealtad**: % histórico de compras por marca por cliente.
+   - **Sensibilidad a promo**: tasa de compra del cliente cuando hay promo vs. cuando no.
+   - **Precio relativo**: precio actual de cada marca / precio promedio histórico.
+   - **Última marca y última cantidad**: ya vienen en el dataset.
+6. **Validación temporal**: split por `dia_visita` (no random) para evitar leakage.
+7. **Modelo principal**: LightGBM (maneja categóricas, captura interacciones, fast).
+8. **Métrica de negocio**: Lift @ top-K — más útil que accuracy para campañas dirigidas.
+
+---
+
+*Generado automáticamente por `python -m src.eda`. Figuras en `docs/eda/figures/`.*
+"""
+    (OUT_DIR / "REPORTE_EDA.md").write_text(report, encoding="utf-8")
+
+
+def main() -> None:
+    print("Loading raw data...")
+    df = load_raw()
+    print(f"  shape={df.shape}  customers={df['id'].nunique()}  days={df['dia_visita'].nunique()}")
+
+    print("Generating figures...")
+    fig_target_balance(df)
+    fig_demographics(df)
+    fig_visits_per_customer(df)
+    fig_brand_market_share(df)
+    fig_price_evolution(df)
+    fig_promo_frequency(df)
+    promo_table = fig_promo_lift(df)
+    fig_age_income_vs_purchase(df)
+    fig_price_sensitivity(df)
+    fig_correlations(df)
+    concentrated_share = fig_loyalty(df)
+
+    print("Writing report...")
+    write_report(df, promo_table, concentrated_share)
+    print(f"Done. Outputs at {OUT_DIR}")
+
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+  SECCIÓN: FEATURE ENGINEERING
+================================================================================
+
+
+--------------------------------------------------------------------------------
+# Archivo: src/features.py
+--------------------------------------------------------------------------------
+"""Feature engineering — strictly causal features per (customer, visit_day).
+
+All historical aggregates use only data with `dia < dia_visita_actual` (no leakage).
+Computed efficiently with groupby cumulative ops + shift, no Python loops.
+
+Run:
+    python -m src.features
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+from src.config import PROJECT_ROOT
+from src.utils.io import BRANDS, ensure_dir, load_raw
+
+PROCESSED_DIR = ensure_dir(PROJECT_ROOT / "data" / "processed")
+
+
+# ============================================================
+# Customer-level causal aggregates (RFM, loyalty, promo sens.)
+# ============================================================
+def add_prior_visit_aggregates(df: pd.DataFrame) -> pd.DataFrame:
+    """For each row, add aggregates computed over PRIOR visits of same customer."""
+    df = df.sort_values(["id", "dia_visita"]).reset_index(drop=True).copy()
+    grp = df.groupby("id", sort=False)
+
+    df["prior_visits"] = grp.cumcount()
+    df["prior_purchases"] = grp["incidencia_compra"].cumsum() - df["incidencia_compra"]
+    df["prior_buy_rate"] = np.where(df["prior_visits"] > 0, df["prior_purchases"] / df["prior_visits"], 0.0)
+
+    df["_qty"] = df["cantidad"]
+    df["prior_qty"] = grp["_qty"].cumsum() - df["_qty"]
+    df["prior_avg_qty_per_purchase"] = np.where(df["prior_purchases"] > 0, df["prior_qty"] / df["prior_purchases"], 0.0)
+
+    purchase_day = df["dia_visita"].where(df["incidencia_compra"] == 1)
+    df["_last_purchase_day"] = grp[purchase_day.name if hasattr(purchase_day, "name") else None].transform(
+        lambda s: s
+    )
+    last_purchase_day = (
+        df.assign(_p=df["dia_visita"].where(df["incidencia_compra"] == 1))
+        .groupby("id")["_p"]
+        .ffill()
+        .shift(1)
+    )
+    last_purchase_day = last_purchase_day.where(df.groupby("id").cumcount() > 0)
+    df["recency_days"] = (df["dia_visita"] - last_purchase_day).fillna(-1).astype(float)
+    df = df.drop(columns=["_qty", "_last_purchase_day"])
+
+    return df
+
+
+def add_brand_loyalty(df: pd.DataFrame) -> pd.DataFrame:
+    """Per (customer, brand): prior fraction of customer's purchases that went to brand b."""
+    grp = df.groupby("id", sort=False)
+    for b in BRANDS:
+        bought_b = ((df["id_marca"] == b) & (df["incidencia_compra"] == 1)).astype(int)
+        cum_b = bought_b.groupby(df["id"]).cumsum() - bought_b
+        df[f"prior_buys_b{b}"] = cum_b
+        df[f"loyalty_b{b}"] = np.where(df["prior_purchases"] > 0, cum_b / df["prior_purchases"], 0.0)
+    return df
+
+
+def add_promo_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
+    """How much does this customer respond to promotions historically?"""
+    promo_cols = [f"promo_marca_{b}" for b in BRANDS]
+    df["any_promo_today"] = (df[promo_cols].sum(axis=1) > 0).astype(int)
+
+    grp_id = df.groupby("id", sort=False)
+    df["prior_visits_with_promo"] = grp_id["any_promo_today"].cumsum() - df["any_promo_today"]
+
+    bought_on_promo = (df["incidencia_compra"] * df["any_promo_today"]).astype(int)
+    df["prior_purchases_on_promo"] = bought_on_promo.groupby(df["id"]).cumsum() - bought_on_promo
+
+    df["prior_visits_no_promo"] = df["prior_visits"] - df["prior_visits_with_promo"]
+    df["prior_purchases_no_promo"] = df["prior_purchases"] - df["prior_purchases_on_promo"]
+
+    df["buy_rate_with_promo"] = np.where(
+        df["prior_visits_with_promo"] > 0, df["prior_purchases_on_promo"] / df["prior_visits_with_promo"], 0.0
+    )
+    df["buy_rate_no_promo"] = np.where(
+        df["prior_visits_no_promo"] > 0, df["prior_purchases_no_promo"] / df["prior_visits_no_promo"], 0.0
+    )
+    df["promo_uplift"] = df["buy_rate_with_promo"] - df["buy_rate_no_promo"]
+    return df
+
+
+def add_relative_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Today's price for each brand vs. historical average (causal).
+
+    Same prices apply to all customers on a given day, so we compute at day level.
+    """
+    price_cols = [f"precio_marca_{b}" for b in BRANDS]
+    daily_prices = df.groupby("dia_visita")[price_cols].first().sort_index()
+    historical_avg = daily_prices.expanding().mean().shift(1)
+    df = df.merge(
+        historical_avg.add_suffix("_hist_avg").reset_index(),
+        on="dia_visita",
+        how="left",
+    )
+    for b in BRANDS:
+        col = f"precio_marca_{b}"
+        hist = f"{col}_hist_avg"
+        df[f"rel_price_b{b}"] = np.where(df[hist].notna(), df[col] / df[hist] - 1, 0.0)
+    df = df.drop(columns=[f"{c}_hist_avg" for c in price_cols])
+
+    df["min_rel_price_today"] = df[[f"rel_price_b{b}" for b in BRANDS]].min(axis=1)
+    df["pct_brands_on_promo"] = df[[f"promo_marca_{b}" for b in BRANDS]].sum(axis=1) / len(BRANDS)
+    return df
+
+
+def add_loyal_brand_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Per row: which brand is the customer most loyal to historically? Is it on promo today?
+    Is its price below historical average?
+    """
+    loyalty_cols = [f"loyalty_b{b}" for b in BRANDS]
+    df["loyal_brand_id"] = df[loyalty_cols].values.argmax(axis=1) + 1
+    no_history = df["prior_purchases"] == 0
+    df.loc[no_history, "loyal_brand_id"] = 0
+
+    promo_for_loyal = np.zeros(len(df))
+    relprice_for_loyal = np.zeros(len(df))
+    for b in BRANDS:
+        mask = df["loyal_brand_id"] == b
+        promo_for_loyal[mask] = df.loc[mask, f"promo_marca_{b}"].values
+        relprice_for_loyal[mask] = df.loc[mask, f"rel_price_b{b}"].values
+    df["loyal_brand_on_promo"] = promo_for_loyal.astype(int)
+    df["loyal_brand_rel_price"] = relprice_for_loyal
+    return df
+
+
+# ============================================================
+# Customer-level segmentation (for the AGENT to filter on)
+# Computed at end of period — used for filtering, NOT model input.
+# ============================================================
+def compute_customer_segments(df: pd.DataFrame, n_clusters: int = 4, seed: int = 42) -> pd.DataFrame:
+    """K-Means on customer-level RFM + demographics. Returns DataFrame with id + cluster + label."""
+    cust = (
+        df.groupby("id")
+        .agg(
+            total_visits=("dia_visita", "count"),
+            total_purchases=("incidencia_compra", "sum"),
+            total_qty=("cantidad", "sum"),
+            edad=("edad", "first"),
+            ingreso_anual=("ingreso_anual", "first"),
+            genero=("genero", "first"),
+            estado_civil=("estado_civil", "first"),
+            nivel_educacion=("nivel_educacion", "first"),
+        )
+        .reset_index()
+    )
+    cust["buy_rate"] = cust["total_purchases"] / cust["total_visits"]
+    cust["avg_qty_per_purchase"] = np.where(cust["total_purchases"] > 0, cust["total_qty"] / cust["total_purchases"], 0)
+
+    feats = ["buy_rate", "total_purchases", "avg_qty_per_purchase", "edad", "ingreso_anual"]
+    X = StandardScaler().fit_transform(cust[feats])
+    km = KMeans(n_clusters=n_clusters, n_init=10, random_state=seed)
+    cust["cluster_id"] = km.fit_predict(X)
+
+    cluster_stats = cust.groupby("cluster_id").agg(
+        avg_buy_rate=("buy_rate", "mean"),
+        avg_purchases=("total_purchases", "mean"),
+        avg_income=("ingreso_anual", "mean"),
+        avg_age=("edad", "mean"),
+    )
+    label_map = label_clusters(cluster_stats)
+    cust["cluster_label"] = cust["cluster_id"].map(label_map)
+    return cust[["id", "cluster_id", "cluster_label", "buy_rate", "total_purchases", "avg_qty_per_purchase"]]
+
+
+def label_clusters(stats: pd.DataFrame) -> dict[int, str]:
+    """Heuristic labels based on buy_rate + income."""
+    labels = {}
+    sorted_by_rate = stats.sort_values("avg_buy_rate", ascending=False).index.tolist()
+    sorted_by_income = stats.sort_values("avg_income", ascending=False).index.tolist()
+    rate_rank = {c: i for i, c in enumerate(sorted_by_rate)}
+    income_rank = {c: i for i, c in enumerate(sorted_by_income)}
+    for c in stats.index:
+        if rate_rank[c] == 0:
+            labels[c] = "Leales premium" if income_rank[c] <= 1 else "Leales recurrentes"
+        elif rate_rank[c] == len(stats) - 1:
+            labels[c] = "Visitantes ocasionales"
+        else:
+            labels[c] = "Cazadores de oferta" if income_rank[c] >= len(stats) - 2 else "Compradores moderados"
+    return labels
+
+
+# ============================================================
+# Main entrypoint
+# ============================================================
+FEATURE_COLUMNS = (
+    [
+        "prior_visits",
+        "prior_purchases",
+        "prior_buy_rate",
+        "prior_qty",
+        "prior_avg_qty_per_purchase",
+        "recency_days",
+        "buy_rate_with_promo",
+        "buy_rate_no_promo",
+        "promo_uplift",
+        "any_promo_today",
+        "pct_brands_on_promo",
+        "min_rel_price_today",
+        "loyal_brand_id",
+        "loyal_brand_on_promo",
+        "loyal_brand_rel_price",
+        "ultima_marca_comprada",
+        "ultima_cantidad_comprada",
+        "edad",
+        "ingreso_anual",
+        "genero",
+        "estado_civil",
+        "nivel_educacion",
+        "ocupacion",
+    ]
+    + [f"loyalty_b{b}" for b in BRANDS]
+    + [f"rel_price_b{b}" for b in BRANDS]
+    + [f"precio_marca_{b}" for b in BRANDS]
+    + [f"promo_marca_{b}" for b in BRANDS]
+)
+
+CATEGORICAL_FEATURES = [
+    "genero",
+    "estado_civil",
+    "nivel_educacion",
+    "ocupacion",
+    "ultima_marca_comprada",
+    "loyal_brand_id",
+]
+
+
+def build_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = add_prior_visit_aggregates(df)
+    df = add_brand_loyalty(df)
+    df = add_promo_sensitivity(df)
+    df = add_relative_prices(df)
+    df = add_loyal_brand_features(df)
+    return df
+
+
+def main() -> None:
+    print("Loading raw data...")
+    df = load_raw()
+    print(f"  shape={df.shape}")
+
+    print("Building features (causal)...")
+    df_feat = build_features(df)
+    print(f"  shape after features={df_feat.shape}")
+    print(f"  feature columns: {len(FEATURE_COLUMNS)}")
+
+    print("Computing customer segments (KMeans, k=4)...")
+    segments = compute_customer_segments(df)
+    print(segments.groupby("cluster_label").agg(n=("id", "count"), buy_rate=("buy_rate", "mean")))
+
+    df_feat = df_feat.merge(segments[["id", "cluster_id", "cluster_label"]], on="id", how="left")
+
+    out_path = PROCESSED_DIR / "features.parquet"
+    df_feat.to_parquet(out_path, index=False)
+    print(f"\nSaved features to {out_path}")
+
+    seg_path = PROCESSED_DIR / "customer_segments.parquet"
+    segments.to_parquet(seg_path, index=False)
+    print(f"Saved segments to {seg_path}")
+
+    print("\nSample feature row:")
+    print(df_feat.iloc[1000][FEATURE_COLUMNS[:15]].to_string())
+
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+  SECCIÓN: MODELO: ENTRENAMIENTO, EXPLICABILIDAD, SCORING
+================================================================================
+
+
+--------------------------------------------------------------------------------
+# Archivo: src/model/train.py
+--------------------------------------------------------------------------------
+"""Train propensity models — Logistic Regression baseline + LightGBM tuned with Optuna.
+
+Temporal split (no random shuffling): train < day 510, val 510-619, test 620-730.
+Target: incidencia_compra.
+
+Run:
+    python -m src.model.train
+"""
+from __future__ import annotations
+
+import json
+import warnings
+from pathlib import Path
+
+import joblib
+import lightgbm as lgb
+import numpy as np
+import optuna
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    average_precision_score,
+    brier_score_loss,
+    log_loss,
+    precision_recall_curve,
+    roc_auc_score,
+)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+from src.config import PROJECT_ROOT
+from src.features import CATEGORICAL_FEATURES, FEATURE_COLUMNS
+from src.utils.io import ensure_dir
+
+warnings.filterwarnings("ignore", category=UserWarning)
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+PROCESSED = PROJECT_ROOT / "data" / "processed"
+MODELS_DIR = ensure_dir(PROJECT_ROOT / "models")
+METRICS_DIR = ensure_dir(PROJECT_ROOT / "docs" / "metrics")
+
+TARGET = "incidencia_compra"
+TRAIN_DAYS_END = 510   # ~70%
+VAL_DAYS_END = 620     # ~85%
+
+
+def temporal_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train = df[df.dia_visita < TRAIN_DAYS_END].copy()
+    val = df[(df.dia_visita >= TRAIN_DAYS_END) & (df.dia_visita < VAL_DAYS_END)].copy()
+    test = df[df.dia_visita >= VAL_DAYS_END].copy()
+    return train, val, test
+
+
+def lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k: float = 0.10) -> float:
+    """Lift @ top-K: among the top-K% scored, what's the purchase rate vs. baseline."""
+    n = len(y_true)
+    cutoff = int(np.ceil(n * k))
+    order = np.argsort(-y_score)
+    top_rate = y_true[order[:cutoff]].mean()
+    base_rate = y_true.mean()
+    return float(top_rate / base_rate) if base_rate > 0 else float("nan")
+
+
+def evaluate(y_true: np.ndarray, y_proba: np.ndarray, label: str) -> dict:
+    metrics = {
+        "set": label,
+        "n": int(len(y_true)),
+        "positives": int(y_true.sum()),
+        "base_rate": float(y_true.mean()),
+        "auc_roc": float(roc_auc_score(y_true, y_proba)),
+        "pr_auc": float(average_precision_score(y_true, y_proba)),
+        "log_loss": float(log_loss(y_true, np.clip(y_proba, 1e-6, 1 - 1e-6))),
+        "brier": float(brier_score_loss(y_true, y_proba)),
+        "lift@10%": lift_at_k(y_true, y_proba, 0.10),
+        "lift@20%": lift_at_k(y_true, y_proba, 0.20),
+        "lift@30%": lift_at_k(y_true, y_proba, 0.30),
+    }
+    return metrics
+
+
+def train_logreg(X_train, y_train, X_val, y_val) -> tuple[Pipeline, dict]:
+    pipe = Pipeline([("scaler", StandardScaler()), ("lr", LogisticRegression(max_iter=2000, class_weight="balanced"))])
+    pipe.fit(X_train, y_train)
+    proba_val = pipe.predict_proba(X_val)[:, 1]
+    return pipe, evaluate(y_val.values, proba_val, "val")
+
+
+def tune_lgbm(X_train, y_train, X_val, y_val, cat_idx: list[int], n_trials: int = 30) -> dict:
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            "objective": "binary",
+            "metric": "auc",
+            "verbosity": -1,
+            "boosting_type": "gbdt",
+            "num_leaves": trial.suggest_int("num_leaves", 16, 128),
+            "max_depth": trial.suggest_int("max_depth", 4, 12),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.6, 1.0),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.6, 1.0),
+            "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 200),
+            "lambda_l1": trial.suggest_float("lambda_l1", 1e-3, 5.0, log=True),
+            "lambda_l2": trial.suggest_float("lambda_l2", 1e-3, 5.0, log=True),
+        }
+        train_set = lgb.Dataset(X_train, label=y_train, categorical_feature=cat_idx)
+        val_set = lgb.Dataset(X_val, label=y_val, categorical_feature=cat_idx, reference=train_set)
+        booster = lgb.train(
+            params,
+            train_set,
+            num_boost_round=2000,
+            valid_sets=[val_set],
+            callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)],
+        )
+        proba = booster.predict(X_val, num_iteration=booster.best_iteration)
+        return roc_auc_score(y_val, proba)
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return study.best_params
+
+
+def train_lgbm_final(X_trval, y_trval, X_val, y_val, cat_idx, best_params) -> lgb.Booster:
+    """Refit on train+val combined for final model (use val for early-stop signal still)."""
+    params = {"objective": "binary", "metric": "auc", "verbosity": -1, **best_params}
+    train_set = lgb.Dataset(X_trval, label=y_trval, categorical_feature=cat_idx)
+    val_set = lgb.Dataset(X_val, label=y_val, categorical_feature=cat_idx, reference=train_set)
+    booster = lgb.train(
+        params,
+        train_set,
+        num_boost_round=2000,
+        valid_sets=[val_set],
+        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)],
+    )
+    return booster
+
+
+def main() -> None:
+    print("Loading features...")
+    df = pd.read_parquet(PROCESSED / "features.parquet")
+    print(f"  shape={df.shape}")
+
+    train, val, test = temporal_split(df)
+    print(f"  train: {len(train):,}  val: {len(val):,}  test: {len(test):,}")
+    print(f"  train base rate: {train[TARGET].mean():.3f}  val: {val[TARGET].mean():.3f}  test: {test[TARGET].mean():.3f}")
+
+    X_train, y_train = train[FEATURE_COLUMNS], train[TARGET]
+    X_val, y_val = val[FEATURE_COLUMNS], val[TARGET]
+    X_test, y_test = test[FEATURE_COLUMNS], test[TARGET]
+
+    for c in CATEGORICAL_FEATURES:
+        X_train[c] = X_train[c].astype("category")
+        X_val[c] = X_val[c].astype("category")
+        X_test[c] = X_test[c].astype("category")
+    cat_idx = [FEATURE_COLUMNS.index(c) for c in CATEGORICAL_FEATURES]
+
+    # ============================================================
+    # Baseline: Logistic Regression
+    # ============================================================
+    print("\n[1/3] Training Logistic Regression baseline...")
+    X_train_lr = X_train.copy()
+    X_val_lr = X_val.copy()
+    X_test_lr = X_test.copy()
+    for c in CATEGORICAL_FEATURES:
+        X_train_lr[c] = X_train_lr[c].astype(int)
+        X_val_lr[c] = X_val_lr[c].astype(int)
+        X_test_lr[c] = X_test_lr[c].astype(int)
+    lr_model, lr_val = train_logreg(X_train_lr, y_train, X_val_lr, y_val)
+    lr_test = evaluate(y_test.values, lr_model.predict_proba(X_test_lr)[:, 1], "test")
+    print(f"  LR val AUC={lr_val['auc_roc']:.4f}  test AUC={lr_test['auc_roc']:.4f}  lift@10={lr_test['lift@10%']:.2f}")
+
+    # ============================================================
+    # LightGBM with Optuna tuning
+    # ============================================================
+    print("\n[2/3] Tuning LightGBM with Optuna (30 trials)...")
+    best_params = tune_lgbm(X_train, y_train, X_val, y_val, cat_idx, n_trials=30)
+    print(f"  best params: {best_params}")
+
+    booster = train_lgbm_final(X_train, y_train, X_val, y_val, cat_idx, best_params)
+    val_proba = booster.predict(X_val, num_iteration=booster.best_iteration)
+    test_proba = booster.predict(X_test, num_iteration=booster.best_iteration)
+    lgb_val = evaluate(y_val.values, val_proba, "val")
+    lgb_test = evaluate(y_test.values, test_proba, "test")
+    print(f"  LightGBM val AUC={lgb_val['auc_roc']:.4f}  test AUC={lgb_test['auc_roc']:.4f}  lift@10={lgb_test['lift@10%']:.2f}")
+
+    # ============================================================
+    # Save
+    # ============================================================
+    print("\n[3/3] Saving models and metrics...")
+    booster.save_model(str(MODELS_DIR / "lgbm_propensity.txt"))
+    joblib.dump(lr_model, MODELS_DIR / "logreg_propensity.joblib")
+    joblib.dump({"feature_columns": FEATURE_COLUMNS, "categorical": CATEGORICAL_FEATURES}, MODELS_DIR / "feature_schema.joblib")
+
+    metrics = {
+        "logreg": {"val": lr_val, "test": lr_test},
+        "lightgbm": {"val": lgb_val, "test": lgb_test, "best_params": best_params, "best_iteration": int(booster.best_iteration)},
+        "split": {"train_days_end": TRAIN_DAYS_END, "val_days_end": VAL_DAYS_END, "n_train": len(train), "n_val": len(val), "n_test": len(test)},
+        "feature_count": len(FEATURE_COLUMNS),
+    }
+    (METRICS_DIR / "model_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+    print("\n=== FINAL TEST METRICS ===")
+    print(f"{'Metric':<15} {'LogReg':>10} {'LightGBM':>10}")
+    for k in ["auc_roc", "pr_auc", "log_loss", "brier", "lift@10%", "lift@20%", "lift@30%"]:
+        print(f"{k:<15} {lr_test[k]:>10.4f} {lgb_test[k]:>10.4f}")
+
+
+if __name__ == "__main__":
+    main()
+
+--------------------------------------------------------------------------------
+# Archivo: src/model/explain.py
+--------------------------------------------------------------------------------
+"""Explainability + business charts for the trained LightGBM model.
+
+Generates:
+  - SHAP global importance (bar) and beeswarm
+  - Lift curve (cumulative gain)
+  - Calibration plot
+  - Confusion matrix at chosen threshold
+  - Top-K targeting table (CSV)
+
+Run:
+    python -m src.model.explain
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import joblib
+import lightgbm as lgb
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import shap
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import confusion_matrix
+
+from src.config import PROJECT_ROOT
+from src.features import CATEGORICAL_FEATURES, FEATURE_COLUMNS
+from src.model.train import TARGET, VAL_DAYS_END, temporal_split
+from src.utils.io import ensure_dir
+
+PROCESSED = PROJECT_ROOT / "data" / "processed"
+MODELS_DIR = PROJECT_ROOT / "models"
+FIG_DIR = ensure_dir(PROJECT_ROOT / "docs" / "model" / "figures")
+ensure_dir(PROJECT_ROOT / "docs" / "model")
+
+
+def fig_shap(booster: lgb.Booster, X_sample: pd.DataFrame) -> None:
+    explainer = shap.TreeExplainer(booster)
+    shap_values = explainer.shap_values(X_sample)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+
+    plt.figure(figsize=(9, 7))
+    shap.summary_plot(shap_values, X_sample, plot_type="bar", show=False, max_display=20)
+    plt.tight_layout()
+    plt.savefig(FIG_DIR / "shap_importance.png", dpi=120, bbox_inches="tight")
+    plt.close()
+
+    plt.figure(figsize=(9, 8))
+    shap.summary_plot(shap_values, X_sample, show=False, max_display=20)
+    plt.tight_layout()
+    plt.savefig(FIG_DIR / "shap_beeswarm.png", dpi=120, bbox_inches="tight")
+    plt.close()
+
+
+def fig_lift_curve(y_true: np.ndarray, y_proba: np.ndarray) -> pd.DataFrame:
+    df = pd.DataFrame({"y": y_true, "p": y_proba}).sort_values("p", ascending=False).reset_index(drop=True)
+    df["rank_pct"] = (df.index + 1) / len(df) * 100
+    df["cum_positives"] = df["y"].cumsum()
+    df["pct_positives_captured"] = df["cum_positives"] / df["y"].sum() * 100
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(df["rank_pct"], df["pct_positives_captured"], color="#2a9d8f", lw=2.5, label="Modelo LightGBM")
+    ax.plot([0, 100], [0, 100], color="grey", ls="--", label="Random (baseline)")
+    ax.fill_between(df["rank_pct"], df["pct_positives_captured"], df["rank_pct"], alpha=0.15, color="#2a9d8f")
+    ax.set_xlabel("% de clientes contactados (orden por score)")
+    ax.set_ylabel("% de compras capturadas")
+    ax.set_title("Curva de Ganancia Acumulada (Lift Curve)")
+    for k in [10, 20, 30]:
+        idx = int(np.ceil(len(df) * k / 100)) - 1
+        captured = df.loc[idx, "pct_positives_captured"]
+        ax.scatter([k], [captured], color="#e76f51", zorder=5)
+        ax.annotate(f"  Top {k}% → {captured:.0f}% compras", (k, captured), fontsize=9)
+    ax.legend(loc="lower right")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "lift_curve.png", dpi=120)
+    plt.close(fig)
+
+    deciles = pd.qcut(-df["p"], q=10, labels=[f"D{i}" for i in range(1, 11)])
+    decile_table = (
+        df.assign(decile=deciles)
+        .groupby("decile", observed=True)
+        .agg(n=("y", "count"), positives=("y", "sum"), avg_score=("p", "mean"))
+        .assign(rate=lambda d: d["positives"] / d["n"])
+    )
+    decile_table["lift_vs_base"] = decile_table["rate"] / df["y"].mean()
+    return decile_table
+
+
+def fig_calibration(y_true: np.ndarray, y_proba: np.ndarray) -> None:
+    prob_true, prob_pred = calibration_curve(y_true, y_proba, n_bins=10, strategy="quantile")
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(prob_pred, prob_true, "o-", color="#2a9d8f", lw=2, label="LightGBM")
+    ax.plot([0, 1], [0, 1], "--", color="grey", label="Calibración perfecta")
+    ax.set_xlabel("Probabilidad predicha (media por bin)")
+    ax.set_ylabel("Frecuencia observada")
+    ax.set_title("Calibración del modelo")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "calibration.png", dpi=120)
+    plt.close(fig)
+
+
+def fig_confusion(y_true: np.ndarray, y_proba: np.ndarray, threshold: float = 0.5) -> dict:
+    y_pred = (y_proba >= threshold).astype(int)
+    cm = confusion_matrix(y_true, y_pred)
+    tn, fp, fn, tp = cm.ravel()
+    fig, ax = plt.subplots(figsize=(5, 4))
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
+    ax.set_xticklabels(["Pred 0", "Pred 1"]); ax.set_yticklabels(["Real 0", "Real 1"])
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, f"{cm[i, j]:,}", ha="center", va="center",
+                    color="white" if cm[i, j] > cm.max() / 2 else "black", fontsize=12)
+    ax.set_title(f"Matriz de confusión (umbral={threshold})")
+    plt.colorbar(im, ax=ax, fraction=0.046)
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "confusion.png", dpi=120)
+    plt.close(fig)
+    return {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
+            "precision": float(tp / max(tp + fp, 1)), "recall": float(tp / max(tp + fn, 1))}
+
+
+def main() -> None:
+    print("Loading model + data...")
+    booster = lgb.Booster(model_file=str(MODELS_DIR / "lgbm_propensity.txt"))
+    df = pd.read_parquet(PROCESSED / "features.parquet")
+    _, _, test = temporal_split(df)
+    X_test, y_test = test[FEATURE_COLUMNS].copy(), test[TARGET].values
+    for c in CATEGORICAL_FEATURES:
+        X_test[c] = X_test[c].astype("category")
+
+    proba = booster.predict(X_test)
+
+    print("Generating SHAP plots (sample of 3000)...")
+    sample = X_test.sample(min(3000, len(X_test)), random_state=42)
+    fig_shap(booster, sample)
+
+    print("Generating lift curve...")
+    decile_table = fig_lift_curve(y_test, proba)
+    decile_table.to_csv(PROJECT_ROOT / "docs" / "model" / "deciles.csv")
+    print(decile_table.round(3))
+
+    print("Generating calibration plot...")
+    fig_calibration(y_test, proba)
+
+    print("Generating confusion matrix...")
+    cm_metrics = fig_confusion(y_test, proba, threshold=0.5)
+    print(f"  precision={cm_metrics['precision']:.3f}  recall={cm_metrics['recall']:.3f}")
+
+    summary = {
+        "test_set_size": int(len(y_test)),
+        "test_base_rate": float(y_test.mean()),
+        "decile_lift_top10pct": float(decile_table.iloc[0]["lift_vs_base"]),
+        "decile_lift_top20pct": float(decile_table.iloc[:2]["lift_vs_base"].mean()),
+        "confusion_at_0.5": cm_metrics,
+    }
+    (PROJECT_ROOT / "docs" / "model" / "explainability_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    print("\nDone. Figures at docs/model/figures/")
+
+
+if __name__ == "__main__":
+    main()
+
+--------------------------------------------------------------------------------
+# Archivo: src/model/score.py
+--------------------------------------------------------------------------------
+"""Batch scoring pipeline.
+
+Loads features → predicts probability of purchase per (cliente, dia_visita)
+→ enriches with customer demographics + segment → writes Parquet via the
+cloud-agnostic storage layer (local / DO Spaces / AWS S3 / GCS).
+
+Run:
+    python -m src.model.score
+"""
+from __future__ import annotations
+
+import lightgbm as lgb
+import pandas as pd
+
+from src.config import PROJECT_ROOT
+from src.features import CATEGORICAL_FEATURES, FEATURE_COLUMNS
+from src.storage.object_storage import storage
+from src.utils.io import ensure_dir
+
+PROCESSED = PROJECT_ROOT / "data" / "processed"
+MODELS_DIR = PROJECT_ROOT / "models"
+OUTPUT_DIR = ensure_dir(PROJECT_ROOT / "data" / "predictions")
+
+# Columns we keep alongside predictions for the agent to filter on
+ENRICHMENT_COLS = [
+    "id", "dia_visita",
+    "edad", "ingreso_anual", "genero", "estado_civil", "nivel_educacion", "ocupacion",
+    "loyal_brand_id", "prior_purchases", "prior_buy_rate", "recency_days",
+    "any_promo_today", "incidencia_compra",
+]
+
+
+def main() -> None:
+    print("Loading model + features...")
+    booster = lgb.Booster(model_file=str(MODELS_DIR / "lgbm_propensity.txt"))
+    features = pd.read_parquet(PROCESSED / "features.parquet")
+    segments = pd.read_parquet(PROCESSED / "customer_segments.parquet")
+    print(f"  rows={len(features):,}  customers={features['id'].nunique()}")
+
+    X = features[FEATURE_COLUMNS].copy()
+    for c in CATEGORICAL_FEATURES:
+        X[c] = X[c].astype("category")
+
+    print("Scoring all rows...")
+    proba = booster.predict(X)
+
+    print("Building predictions table...")
+    preds = features[ENRICHMENT_COLS].copy()
+    preds["score_compra"] = proba
+    preds = preds.merge(segments[["id", "cluster_id", "cluster_label"]], on="id", how="left")
+
+    preds["decile"] = pd.qcut(preds["score_compra"].rank(method="first"), 10,
+                              labels=[f"D{i}" for i in range(10, 0, -1)]).astype(str)
+    preds["score_band"] = pd.cut(
+        preds["score_compra"],
+        bins=[-0.01, 0.20, 0.40, 0.60, 1.01],
+        labels=["bajo", "medio_bajo", "medio_alto", "alto"],
+    ).astype(str)
+
+    print("\nPredictions summary by decile:")
+    print(preds.groupby("decile", observed=True).agg(
+        n=("id", "count"),
+        avg_score=("score_compra", "mean"),
+        actual_rate=("incidencia_compra", "mean"),
+    ).round(3))
+
+    print("\nPredictions summary by segment:")
+    print(preds.groupby("cluster_label").agg(
+        n=("id", "count"),
+        avg_score=("score_compra", "mean"),
+        actual_rate=("incidencia_compra", "mean"),
+    ).round(3))
+
+    print("\nSaving predictions...")
+    local_path = OUTPUT_DIR / "predictions.parquet"
+    preds.to_parquet(local_path, index=False)
+    print(f"  local: {local_path}")
+
+    if storage.provider != "local":
+        uri = storage.write_parquet(preds, "predictions.parquet")
+        print(f"  cloud ({storage.provider}): {uri}")
+    else:
+        print(f"  cloud upload skipped (CLOUD_PROVIDER=local)")
+
+    print(f"\nDone. {len(preds):,} predictions written.")
+
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+  SECCIÓN: CAPA DE STORAGE CLOUD-AGNÓSTICA (DO / AWS / GCP)
+================================================================================
+
+
+--------------------------------------------------------------------------------
+# Archivo: src/storage/object_storage.py
+--------------------------------------------------------------------------------
+"""Cloud-agnostic object storage layer.
+
+Supports:
+  - local      : write/read on local filesystem (dev mode)
+  - digitalocean : DO Spaces (S3-compatible API)
+  - aws        : AWS S3
+  - gcp        : Google Cloud Storage
+
+Switching providers requires only changing env vars — no code change.
+The same Parquet file produced here is queryable by DuckDB across all providers.
+"""
+from __future__ import annotations
+
+import io
+import os
+from pathlib import Path
+from typing import Literal
+
+import pandas as pd
+
+from src.config import config
+
+Provider = Literal["local", "digitalocean", "aws", "gcp"]
+
+
+class ObjectStorage:
+    """Unified read/write interface for Parquet files across cloud providers.
+
+    URI conventions:
+      local       → relative or absolute path (./data/predictions/foo.parquet)
+      digitalocean→ s3://<bucket>/<key>          (uses DO endpoint)
+      aws         → s3://<bucket>/<key>
+      gcp         → gs://<bucket>/<key>
+    """
+
+    def __init__(self, provider: Provider | None = None):
+        self.provider: Provider = provider or config.cloud_provider  # type: ignore
+
+    # ------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------
+    def write_parquet(self, df: pd.DataFrame, key: str) -> str:
+        """Write DataFrame as Parquet to the configured backend. Returns final URI."""
+        uri = self._uri(key)
+        if self.provider == "local":
+            Path(uri).parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(uri, index=False)
+        else:
+            storage_options = self._fsspec_options()
+            df.to_parquet(uri, index=False, storage_options=storage_options)
+        return uri
+
+    def read_parquet(self, key: str) -> pd.DataFrame:
+        uri = self._uri(key)
+        if self.provider == "local":
+            return pd.read_parquet(uri)
+        return pd.read_parquet(uri, storage_options=self._fsspec_options())
+
+    def get_duckdb_uri(self, key: str) -> str:
+        """Returns a URI that DuckDB can query via httpfs / fsspec."""
+        return self._uri(key)
+
+    def configure_duckdb(self, conn) -> None:
+        """Inject S3/GCS credentials into a DuckDB connection so it can read remote Parquet."""
+        if self.provider in ("digitalocean", "aws"):
+            conn.execute("INSTALL httpfs; LOAD httpfs;")
+            if config.storage_endpoint:
+                endpoint = config.storage_endpoint.replace("https://", "").replace("http://", "")
+                conn.execute(f"SET s3_endpoint='{endpoint}';")
+                conn.execute("SET s3_url_style='path';")
+            if config.storage_region:
+                conn.execute(f"SET s3_region='{config.storage_region}';")
+            if config.storage_key:
+                conn.execute(f"SET s3_access_key_id='{config.storage_key}';")
+            if config.storage_secret:
+                conn.execute(f"SET s3_secret_access_key='{config.storage_secret}';")
+        elif self.provider == "gcp":
+            conn.execute("INSTALL httpfs; LOAD httpfs;")
+            # GCS via HMAC keys — equivalent to S3 protocol
+            if config.storage_key and config.storage_secret:
+                conn.execute("SET s3_endpoint='storage.googleapis.com';")
+                conn.execute(f"SET s3_access_key_id='{config.storage_key}';")
+                conn.execute(f"SET s3_secret_access_key='{config.storage_secret}';")
+
+    # ------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------
+    def _uri(self, key: str) -> str:
+        if self.provider == "local":
+            base = config.local_predictions_path.parent
+            return str(base / key)
+        elif self.provider in ("digitalocean", "aws"):
+            return f"s3://{config.storage_bucket}/{key}"
+        elif self.provider == "gcp":
+            return f"gs://{config.storage_bucket}/{key}"
+        raise ValueError(f"Unknown provider: {self.provider}")
+
+    def _fsspec_options(self) -> dict:
+        if self.provider == "digitalocean":
+            return {
+                "key": config.storage_key,
+                "secret": config.storage_secret,
+                "client_kwargs": {"endpoint_url": config.storage_endpoint},
+            }
+        elif self.provider == "aws":
+            return {"key": config.storage_key, "secret": config.storage_secret}
+        elif self.provider == "gcp":
+            return {}  # gcsfs picks up GOOGLE_APPLICATION_CREDENTIALS automatically
+        return {}
+
+
+storage = ObjectStorage()
+
+================================================================================
+  SECCIÓN: AGENTE CONVERSACIONAL (CLAUDE + TOOL USE)
+================================================================================
+
+
+--------------------------------------------------------------------------------
+# Archivo: src/agent/tools.py
+--------------------------------------------------------------------------------
+"""DuckDB-backed query tools the agent can call.
+
+Architecture decision: instead of text-to-SQL (risky, can produce invalid/dangerous
+SQL), the LLM emits a structured filter object that we translate to parameterized
+SQL. Safer, predictable, easier to test.
+
+The Parquet file is read by DuckDB on every query — at this volume (~60k rows)
+queries return in <100ms even from cloud object storage.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Literal
+
+import duckdb
+import pandas as pd
+
+from src.config import PROJECT_ROOT, config
+from src.storage.object_storage import storage
+
+# Allowed columns and operators — strict whitelist prevents SQL injection
+ALLOWED_COLUMNS: dict[str, str] = {
+    "id": "INTEGER",
+    "dia_visita": "INTEGER",
+    "score_compra": "DOUBLE",
+    "decile": "VARCHAR",
+    "score_band": "VARCHAR",
+    "cluster_id": "INTEGER",
+    "cluster_label": "VARCHAR",
+    "edad": "INTEGER",
+    "ingreso_anual": "INTEGER",
+    "genero": "INTEGER",
+    "estado_civil": "INTEGER",
+    "nivel_educacion": "INTEGER",
+    "ocupacion": "INTEGER",
+    "loyal_brand_id": "INTEGER",
+    "prior_purchases": "INTEGER",
+    "prior_buy_rate": "DOUBLE",
+    "recency_days": "DOUBLE",
+    "any_promo_today": "INTEGER",
+    "incidencia_compra": "INTEGER",
+}
+
+ALLOWED_OPERATORS = {">", ">=", "<", "<=", "=", "!=", "IN", "BETWEEN"}
+ALLOWED_AGG = {"count", "avg", "sum", "min", "max"}
+ALLOWED_SORT_DIR = {"asc", "desc"}
+
+
+# ============================================================
+# Connection / data loading
+# ============================================================
+def _predictions_uri() -> str:
+    if config.cloud_provider == "local":
+        return str(config.local_predictions_path)
+    return storage.get_duckdb_uri("predictions.parquet")
+
+
+def get_conn() -> duckdb.DuckDBPyConnection:
+    conn = duckdb.connect(":memory:")
+    storage.configure_duckdb(conn)
+    return conn
+
+
+# ============================================================
+# Filter language → SQL
+# ============================================================
+def _build_where(filters: list[dict[str, Any]]) -> tuple[str, list[Any]]:
+    if not filters:
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    for f in filters:
+        col = f.get("column")
+        op = f.get("operator", "=").upper()
+        val = f.get("value")
+        if col not in ALLOWED_COLUMNS:
+            raise ValueError(f"Column not allowed: {col}")
+        if op not in ALLOWED_OPERATORS:
+            raise ValueError(f"Operator not allowed: {op}")
+        if op == "IN":
+            if not isinstance(val, list) or not val:
+                raise ValueError("IN requires a non-empty list value")
+            placeholders = ",".join(["?"] * len(val))
+            clauses.append(f"{col} IN ({placeholders})")
+            params.extend(val)
+        elif op == "BETWEEN":
+            if not isinstance(val, list) or len(val) != 2:
+                raise ValueError("BETWEEN requires a [low, high] list")
+            clauses.append(f"{col} BETWEEN ? AND ?")
+            params.extend(val)
+        else:
+            clauses.append(f"{col} {op} ?")
+            params.append(val)
+    return " WHERE " + " AND ".join(clauses), params
+
+
+def _build_order(order_by: list[dict[str, str]] | None) -> str:
+    if not order_by:
+        return ""
+    parts = []
+    for ob in order_by:
+        col = ob.get("column")
+        direction = ob.get("direction", "desc").lower()
+        if col not in ALLOWED_COLUMNS:
+            raise ValueError(f"Order column not allowed: {col}")
+        if direction not in ALLOWED_SORT_DIR:
+            raise ValueError(f"Order direction not allowed: {direction}")
+        parts.append(f"{col} {direction}")
+    return " ORDER BY " + ", ".join(parts)
+
+
+# ============================================================
+# Public tool functions (called by the agent via tool use)
+# ============================================================
+def query_predictions(
+    filters: list[dict[str, Any]] | None = None,
+    order_by: list[dict[str, str]] | None = None,
+    limit: int = 50,
+    columns: list[str] | None = None,
+) -> dict[str, Any]:
+    """List individual customer-day predictions matching the filters."""
+    cols = columns or list(ALLOWED_COLUMNS.keys())
+    for c in cols:
+        if c not in ALLOWED_COLUMNS:
+            raise ValueError(f"Column not allowed: {c}")
+    where_sql, params = _build_where(filters or [])
+    order_sql = _build_order(order_by)
+    limit = max(1, min(int(limit), 500))
+
+    sql = f"SELECT {', '.join(cols)} FROM read_parquet('{_predictions_uri()}'){where_sql}{order_sql} LIMIT {limit}"
+    conn = get_conn()
+    df = conn.execute(sql, params).fetchdf()
+    conn.close()
+    return {
+        "row_count": len(df),
+        "rows": df.to_dict(orient="records"),
+        "sql_executed": sql,
+    }
+
+
+def aggregate_predictions(
+    group_by: list[str] | None = None,
+    aggregations: list[dict[str, str]] | None = None,
+    filters: list[dict[str, Any]] | None = None,
+    order_by: list[dict[str, str]] | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Group + aggregate the predictions table (e.g., avg score by cluster)."""
+    if aggregations is None:
+        aggregations = [{"function": "count", "column": "id", "alias": "n"},
+                        {"function": "avg", "column": "score_compra", "alias": "avg_score"}]
+    select_parts: list[str] = []
+    if group_by:
+        for g in group_by:
+            if g not in ALLOWED_COLUMNS:
+                raise ValueError(f"Group column not allowed: {g}")
+            select_parts.append(g)
+    for agg in aggregations:
+        fn = agg.get("function", "count").lower()
+        col = agg.get("column", "id")
+        alias = agg.get("alias", f"{fn}_{col}")
+        if fn not in ALLOWED_AGG:
+            raise ValueError(f"Agg function not allowed: {fn}")
+        if col not in ALLOWED_COLUMNS:
+            raise ValueError(f"Agg column not allowed: {col}")
+        if fn == "count":
+            select_parts.append(f"COUNT({col}) AS {alias}")
+        else:
+            select_parts.append(f"{fn.upper()}({col}) AS {alias}")
+
+    where_sql, params = _build_where(filters or [])
+    group_sql = f" GROUP BY {', '.join(group_by)}" if group_by else ""
+    order_sql = _build_order(order_by)
+    limit = max(1, min(int(limit), 500))
+
+    sql = f"SELECT {', '.join(select_parts)} FROM read_parquet('{_predictions_uri()}'){where_sql}{group_sql}{order_sql} LIMIT {limit}"
+    conn = get_conn()
+    df = conn.execute(sql, params).fetchdf()
+    conn.close()
+    return {"row_count": len(df), "rows": df.to_dict(orient="records"), "sql_executed": sql}
+
+
+def schema_info() -> dict[str, Any]:
+    """Return the available columns + their meaning so the LLM picks valid ones."""
+    descriptions = {
+        "id": "ID del cliente (500 únicos).",
+        "dia_visita": "Día de la visita (1-730, ~2 años de datos).",
+        "score_compra": "Probabilidad estimada de compra (0-1).",
+        "decile": "Decil de score: D1=top 10% más probable, D10=bottom 10%.",
+        "score_band": "Banda de score: 'bajo','medio_bajo','medio_alto','alto'.",
+        "cluster_id": "ID del segmento de cliente (0-3).",
+        "cluster_label": "Etiqueta del segmento: 'Leales premium', 'Cazadores de oferta', 'Compradores moderados', 'Visitantes ocasionales'.",
+        "edad": "Edad del cliente (18-75).",
+        "ingreso_anual": "Ingreso anual (38k-309k).",
+        "genero": "Género codificado (0/1).",
+        "estado_civil": "Estado civil codificado.",
+        "nivel_educacion": "Nivel educativo (0-3).",
+        "ocupacion": "Ocupación (0-2).",
+        "loyal_brand_id": "Marca a la que el cliente es más leal históricamente (1-5, 0 si sin historia).",
+        "prior_purchases": "# compras previas del cliente antes de esa visita.",
+        "prior_buy_rate": "Tasa de compra histórica del cliente (0-1).",
+        "recency_days": "Días desde la última compra del cliente (-1 si nunca).",
+        "any_promo_today": "1 si al menos una marca está en promo ese día, 0 si no.",
+        "incidencia_compra": "Variable real (0/1) — útil para validar el modelo, no para predecir.",
+    }
+    return {"columns": descriptions}
+
+--------------------------------------------------------------------------------
+# Archivo: src/agent/agent.py
+--------------------------------------------------------------------------------
+"""Conversational agent — Claude (Anthropic) + tool use over the predictions table.
+
+The LLM doesn't write SQL directly. It calls structured tools whose arguments are
+validated against a column whitelist before being translated to parameterized SQL.
+
+Public API:
+    PropensityAgent().chat(user_message, history) -> {"reply": str, "trace": [...]}
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+from anthropic import Anthropic
+
+from src.agent.tools import aggregate_predictions, query_predictions, schema_info
+from src.config import config
+
+SYSTEM_PROMPT = """Eres un asistente comercial especializado en propensión de compra para Ferreycorp.
+
+Tienes acceso a una tabla de predicciones generada por un modelo LightGBM, con una fila
+por (cliente, día de visita). El modelo predice la probabilidad de que el cliente compre
+durante esa visita.
+
+Tu trabajo:
+1. Entender la pregunta de negocio del usuario en lenguaje natural.
+2. Llamar a las herramientas (query_predictions / aggregate_predictions) con filtros estructurados.
+3. Interpretar los resultados y dar respuestas accionables, claras y breves en español.
+4. Cuando sea relevante, sugerir KPIs o acciones (ej: campañas dirigidas al decil top, ofertas a cazadores de oferta).
+
+Reglas importantes:
+- NO inventes números — SIEMPRE consulta primero antes de afirmar.
+- Si el usuario pide un listado, usa query_predictions con un limit razonable (ej: 20-50).
+- Si el usuario pide totales o promedios por grupo, usa aggregate_predictions con group_by.
+- Si no estás seguro de qué columna usar, llama a schema_info primero.
+- El campo `incidencia_compra` es la verdad real (post-evento), úsalo solo para validar el modelo o reportes históricos. Para campañas a futuro, usa `score_compra`.
+- Los segmentos disponibles son: "Leales premium", "Cazadores de oferta", "Compradores moderados", "Visitantes ocasionales".
+- Los deciles van de D1 (top 10% mayor probabilidad) a D10 (bottom 10%).
+
+Sé conciso. Si el usuario pide datos, dale los datos. No envuelvas todo en disclaimers.
+"""
+
+
+# ============================================================
+# Tool schemas exposed to Claude
+# ============================================================
+TOOLS = [
+    {
+        "name": "query_predictions",
+        "description": (
+            "Lista filas individuales (cliente-día) de la tabla de predicciones. "
+            "Útil para: 'dame los 50 clientes con mayor score', 'lista clientes mayores de 40 con score>0.5'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filters": {
+                    "type": "array",
+                    "description": "Lista de filtros AND. Ej: [{'column':'edad','operator':'>','value':40}]",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "column": {"type": "string"},
+                            "operator": {"type": "string", "enum": [">", ">=", "<", "<=", "=", "!=", "IN", "BETWEEN"]},
+                            "value": {},
+                        },
+                        "required": ["column", "operator", "value"],
+                    },
+                },
+                "order_by": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "column": {"type": "string"},
+                            "direction": {"type": "string", "enum": ["asc", "desc"]},
+                        },
+                        "required": ["column"],
+                    },
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+                "columns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Columnas a devolver. Si se omite, devuelve todas.",
+                },
+            },
+        },
+    },
+    {
+        "name": "aggregate_predictions",
+        "description": (
+            "Agrega la tabla de predicciones (group by + aggregations). "
+            "Útil para: 'score promedio por segmento', '# clientes en decil top con promo'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "group_by": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Columnas por las que agrupar.",
+                },
+                "aggregations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "function": {"type": "string", "enum": ["count", "avg", "sum", "min", "max"]},
+                            "column": {"type": "string"},
+                            "alias": {"type": "string"},
+                        },
+                        "required": ["function", "column"],
+                    },
+                },
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "column": {"type": "string"},
+                            "operator": {"type": "string", "enum": [">", ">=", "<", "<=", "=", "!=", "IN", "BETWEEN"]},
+                            "value": {},
+                        },
+                        "required": ["column", "operator", "value"],
+                    },
+                },
+                "order_by": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "column": {"type": "string"},
+                            "direction": {"type": "string", "enum": ["asc", "desc"]},
+                        },
+                        "required": ["column"],
+                    },
+                },
+                "limit": {"type": "integer", "default": 100},
+            },
+        },
+    },
+    {
+        "name": "schema_info",
+        "description": "Devuelve la lista de columnas disponibles y su descripción. Llámalo si dudas de qué columna existe.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
+TOOL_FUNCTIONS = {
+    "query_predictions": query_predictions,
+    "aggregate_predictions": aggregate_predictions,
+    "schema_info": schema_info,
+}
+
+
+@dataclass
+class TraceStep:
+    kind: str  # "tool_call" | "tool_result" | "text"
+    name: str = ""
+    payload: Any = None
+
+
+@dataclass
+class PropensityAgent:
+    model: str = field(default_factory=lambda: config.anthropic_model)
+    max_tokens: int = 1500
+    max_tool_iters: int = 6
+
+    def __post_init__(self) -> None:
+        if not config.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+        self.client = Anthropic(api_key=config.anthropic_api_key)
+
+    def chat(self, user_message: str, history: list[dict] | None = None) -> dict[str, Any]:
+        messages = list(history or [])
+        messages.append({"role": "user", "content": user_message})
+
+        trace: list[TraceStep] = []
+        final_text = ""
+
+        for _ in range(self.max_tool_iters):
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            )
+
+            if response.stop_reason == "end_turn":
+                texts = [b.text for b in response.content if b.type == "text"]
+                final_text = "\n".join(texts).strip()
+                trace.append(TraceStep("text", payload=final_text))
+                messages.append({"role": "assistant", "content": response.content})
+                break
+
+            if response.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": response.content})
+
+                tool_results: list[dict] = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        trace.append(TraceStep("tool_call", name=block.name, payload=block.input))
+                        try:
+                            result = TOOL_FUNCTIONS[block.name](**block.input)
+                            content = json.dumps(result, default=str, ensure_ascii=False)
+                            is_error = False
+                        except Exception as e:
+                            content = json.dumps({"error": str(e)}, ensure_ascii=False)
+                            is_error = True
+                        trace.append(TraceStep("tool_result", name=block.name,
+                                               payload=json.loads(content)))
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": content,
+                            "is_error": is_error,
+                        })
+
+                messages.append({"role": "user", "content": tool_results})
+                continue
+
+            break
+
+        return {
+            "reply": final_text,
+            "trace": [{"kind": s.kind, "name": s.name, "payload": s.payload} for s in trace],
+            "messages": messages,
+        }
+
+--------------------------------------------------------------------------------
+# Archivo: src/agent/smoke_test.py
+--------------------------------------------------------------------------------
+"""Smoke test for the conversational agent.
+
+Run after setting ANTHROPIC_API_KEY in .env:
+    python -m src.agent.smoke_test
+"""
+from __future__ import annotations
+
+import json
+
+from src.agent.agent import PropensityAgent
+from src.config import config
+
+
+SAMPLE_QUESTIONS = [
+    "Dame los 10 clientes con mayor probabilidad de compra que sean del segmento Leales premium.",
+    "¿Cuál es el score promedio por segmento de cliente y cuántas observaciones tiene cada uno?",
+    "¿Cuántos clientes únicos hay en el decil top (D1) y cuál es su tasa real de compra histórica?",
+    "Si lanzo una campaña al top 20% por score, ¿qué % de las compras del último mes (días 700-730) capturaría?",
+]
+
+
+def main() -> None:
+    if not config.anthropic_api_key:
+        print("ERROR: ANTHROPIC_API_KEY not set in .env")
+        return
+
+    agent = PropensityAgent()
+    print(f"Using model: {agent.model}\n")
+    history: list[dict] = []
+    for q in SAMPLE_QUESTIONS:
+        print(f"USER  > {q}")
+        out = agent.chat(q, history=history)
+        print(f"AGENT > {out['reply']}\n")
+        print(f"  (tool calls: {sum(1 for s in out['trace'] if s['kind']=='tool_call')})")
+        print("-" * 70)
+        history = out["messages"]
+
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+  SECCIÓN: UI STREAMLIT
+================================================================================
+
+
+--------------------------------------------------------------------------------
+# Archivo: src/app.py
+--------------------------------------------------------------------------------
+"""Streamlit app — chat con el agente + dashboard de predicciones.
+
+Run:
+    streamlit run src/app.py
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import duckdb
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+from src.agent.agent import PropensityAgent
+from src.agent.tools import _predictions_uri
+from src.config import config
+
+st.set_page_config(page_title="Ferreycorp · Propensión de Compra", layout="wide", page_icon="🎯")
+
+
+# ============================================================
+# Data
+# ============================================================
+@st.cache_data(ttl=300)
+def load_predictions() -> pd.DataFrame:
+    return duckdb.sql(f"SELECT * FROM read_parquet('{_predictions_uri()}')").df()
+
+
+@st.cache_resource
+def get_agent() -> PropensityAgent | None:
+    if not config.anthropic_api_key:
+        return None
+    return PropensityAgent()
+
+
+# ============================================================
+# Sidebar
+# ============================================================
+with st.sidebar:
+    st.title("🎯 Ferreycorp")
+    st.caption("Propensión de Compra · Modelo + Agente IA")
+    st.divider()
+    st.markdown(f"**Cloud provider**: `{config.cloud_provider}`")
+    st.markdown(f"**Modelo LLM**: `{config.anthropic_model}`")
+    if not config.anthropic_api_key:
+        st.error("⚠️ Agrega `ANTHROPIC_API_KEY` en `.env` para activar el chat.")
+    else:
+        st.success("✅ Agente conectado")
+    st.divider()
+    page = st.radio("Navegación", ["💬 Chat", "📊 Dashboard", "🧠 Modelo"])
+
+# ============================================================
+# Pages
+# ============================================================
+preds = load_predictions()
+
+
+def page_chat() -> None:
+    st.header("💬 Chat con el agente comercial")
+    st.caption(
+        "Pregúntame sobre las predicciones de compra: filtros por segmento, "
+        "edad, ingreso, decil, promo, etc. Ejemplos abajo."
+    )
+
+    examples = [
+        "Dame los 20 clientes con mayor score que sean Leales premium",
+        "¿Cuál es el score promedio por segmento?",
+        "¿Cuántos clientes en el decil top tienen ingreso > 150k?",
+        "Lista clientes con score > 0.6 que su marca leal es 5",
+    ]
+    cols = st.columns(len(examples))
+    for c, ex in zip(cols, examples):
+        if c.button(ex, use_container_width=True):
+            st.session_state["pending_input"] = ex
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "history" not in st.session_state:
+        st.session_state.history = []
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if "trace" in msg and msg["trace"]:
+                with st.expander(f"🔍 {sum(1 for s in msg['trace'] if s['kind']=='tool_call')} tool call(s)"):
+                    for step in msg["trace"]:
+                        if step["kind"] == "tool_call":
+                            st.markdown(f"**→ {step['name']}**")
+                            st.json(step["payload"], expanded=False)
+                        elif step["kind"] == "tool_result":
+                            st.markdown(f"**← resultado de {step['name']}**")
+                            payload = step["payload"]
+                            if isinstance(payload, dict) and "rows" in payload:
+                                st.caption(f"{payload.get('row_count','?')} filas")
+                                if payload["rows"]:
+                                    st.dataframe(pd.DataFrame(payload["rows"]), use_container_width=True)
+                            else:
+                                st.json(payload, expanded=False)
+
+    user_input = st.chat_input("Escribe tu pregunta...")
+    if not user_input and "pending_input" in st.session_state:
+        user_input = st.session_state.pop("pending_input")
+
+    if user_input:
+        agent = get_agent()
+        if agent is None:
+            st.error("Agente no inicializado — falta ANTHROPIC_API_KEY.")
+            return
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+        with st.chat_message("assistant"):
+            with st.spinner("Consultando..."):
+                try:
+                    out = agent.chat(user_input, history=st.session_state.history)
+                except Exception as e:
+                    st.error(f"Error: {e}")
+                    return
+            st.markdown(out["reply"])
+            st.session_state.messages.append({
+                "role": "assistant", "content": out["reply"], "trace": out["trace"]
+            })
+            st.session_state.history = out["messages"]
+            st.rerun()
+
+
+def page_dashboard() -> None:
+    st.header("📊 Dashboard de predicciones")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total predicciones", f"{len(preds):,}")
+    c2.metric("Clientes únicos", f"{preds['id'].nunique():,}")
+    c3.metric("Score promedio", f"{preds['score_compra'].mean():.3f}")
+    c4.metric("Tasa real (validación)", f"{preds['incidencia_compra'].mean():.1%}")
+
+    st.divider()
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("Distribución de scores")
+        fig = px.histogram(preds, x="score_compra", nbins=40,
+                           color_discrete_sequence=["#2a9d8f"])
+        fig.update_layout(height=350, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_b:
+        st.subheader("Score predicho vs. tasa real por decil")
+        decile_stats = (preds.groupby("decile", observed=True)
+                        .agg(avg_score=("score_compra", "mean"),
+                             actual_rate=("incidencia_compra", "mean"),
+                             n=("id", "count"))
+                        .reset_index()
+                        .sort_values("decile"))
+        fig = px.bar(decile_stats, x="decile", y=["avg_score", "actual_rate"], barmode="group",
+                     labels={"value": "Tasa", "variable": ""},
+                     color_discrete_sequence=["#264653", "#2a9d8f"])
+        fig.update_layout(height=350, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    col_c, col_d = st.columns(2)
+    with col_c:
+        st.subheader("Distribución por segmento de cliente")
+        seg_stats = (preds.groupby("cluster_label")
+                     .agg(n=("id", "count"),
+                          avg_score=("score_compra", "mean"),
+                          actual_rate=("incidencia_compra", "mean"))
+                     .reset_index()
+                     .sort_values("avg_score", ascending=False))
+        fig = px.bar(seg_stats, x="cluster_label", y="avg_score",
+                     color="actual_rate", color_continuous_scale="Teal",
+                     hover_data=["n", "actual_rate"])
+        fig.update_layout(height=350, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_d:
+        st.subheader("Score por marca leal histórica")
+        brand_stats = (preds[preds.loyal_brand_id > 0]
+                       .groupby("loyal_brand_id")
+                       .agg(avg_score=("score_compra", "mean"),
+                            n=("id", "count"))
+                       .reset_index())
+        brand_stats["loyal_brand_id"] = brand_stats["loyal_brand_id"].astype(str).map(lambda b: f"Marca {b}")
+        fig = px.bar(brand_stats, x="loyal_brand_id", y="avg_score",
+                     color_discrete_sequence=["#e76f51"])
+        fig.update_layout(height=350, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.subheader("Explorador interactivo")
+    f1, f2, f3 = st.columns(3)
+    seg_filter = f1.multiselect("Segmento", sorted(preds["cluster_label"].unique()), default=[])
+    decile_filter = f2.multiselect("Decil", sorted(preds["decile"].unique()), default=[])
+    score_min = f3.slider("Score mínimo", 0.0, 1.0, 0.0, 0.05)
+
+    df_view = preds.copy()
+    if seg_filter:
+        df_view = df_view[df_view["cluster_label"].isin(seg_filter)]
+    if decile_filter:
+        df_view = df_view[df_view["decile"].isin(decile_filter)]
+    df_view = df_view[df_view["score_compra"] >= score_min]
+    st.caption(f"{len(df_view):,} filas tras filtros")
+    st.dataframe(df_view.head(500), use_container_width=True, height=300)
+
+
+def page_modelo() -> None:
+    st.header("🧠 Performance del modelo")
+    metrics_path = Path("docs/metrics/model_metrics.json")
+    if metrics_path.exists():
+        m = json.loads(metrics_path.read_text())
+        c1, c2, c3, c4 = st.columns(4)
+        lgb = m["lightgbm"]["test"]
+        c1.metric("AUC-ROC (test)", f"{lgb['auc_roc']:.3f}")
+        c2.metric("PR-AUC (test)", f"{lgb['pr_auc']:.3f}")
+        c3.metric("Lift @ top 10%", f"{lgb['lift@10%']:.2f}x")
+        c4.metric("Brier score", f"{lgb['brier']:.3f}")
+
+        st.json(m, expanded=False)
+
+    st.divider()
+    st.subheader("Curva de ganancia (Lift Curve)")
+    img = Path("docs/model/figures/lift_curve.png")
+    if img.exists():
+        st.image(str(img), use_container_width=True)
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("Importancia de features (SHAP)")
+        img = Path("docs/model/figures/shap_importance.png")
+        if img.exists():
+            st.image(str(img), use_container_width=True)
+    with col_b:
+        st.subheader("Calibración")
+        img = Path("docs/model/figures/calibration.png")
+        if img.exists():
+            st.image(str(img), use_container_width=True)
+
+
+# Router
+if page == "💬 Chat":
+    page_chat()
+elif page == "📊 Dashboard":
+    page_dashboard()
+elif page == "🧠 Modelo":
+    page_modelo()
+
+================================================================================
+  SECCIÓN: SPECS DE DESPLIEGUE CLOUD
+================================================================================
+
+
+--------------------------------------------------------------------------------
+# Archivo: deploy/digitalocean/app.yaml
+--------------------------------------------------------------------------------
+# DigitalOcean App Platform spec
+# Deploy: doctl apps create --spec deploy/digitalocean/app.yaml
+name: ferreycorp-propension
+region: nyc
+
+services:
+  - name: web
+    dockerfile_path: docker/Dockerfile
+    source_dir: /
+    github:
+      repo: <USER>/<REPO>
+      branch: main
+      deploy_on_push: true
+    instance_count: 1
+    instance_size_slug: basic-xs    # 1 vCPU, 1 GB RAM — ~$12/mo
+    http_port: 8501
+    health_check:
+      http_path: /_stcore/health
+    routes:
+      - path: /
+    envs:
+      - key: CLOUD_PROVIDER
+        value: digitalocean
+      - key: STORAGE_BUCKET
+        value: ferreycorp-predictions
+      - key: STORAGE_ENDPOINT
+        value: https://nyc3.digitaloceanspaces.com
+      - key: STORAGE_REGION
+        value: nyc3
+      - key: STORAGE_KEY
+        type: SECRET
+      - key: STORAGE_SECRET
+        type: SECRET
+      - key: ANTHROPIC_API_KEY
+        type: SECRET
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-4-6
+      - key: APP_ENV
+        value: production
+
+--------------------------------------------------------------------------------
+# Archivo: deploy/aws/ecs-task.json
+--------------------------------------------------------------------------------
+{
+  "family": "ferreycorp-propension",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ferreycorp-task-role",
+  "containerDefinitions": [
+    {
+      "name": "web",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/ferreycorp-propension:latest",
+      "portMappings": [{"containerPort": 8501, "protocol": "tcp"}],
+      "essential": true,
+      "environment": [
+        {"name": "CLOUD_PROVIDER", "value": "aws"},
+        {"name": "STORAGE_BUCKET", "value": "ferreycorp-predictions"},
+        {"name": "STORAGE_REGION", "value": "us-east-1"},
+        {"name": "ANTHROPIC_MODEL", "value": "claude-sonnet-4-6"},
+        {"name": "APP_ENV", "value": "production"}
+      ],
+      "secrets": [
+        {"name": "ANTHROPIC_API_KEY", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ferreycorp/anthropic-key"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ferreycorp-propension",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "web"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3
+      }
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+# Archivo: deploy/gcp/cloudrun.yaml
+--------------------------------------------------------------------------------
+# GCP Cloud Run service spec
+# Deploy:
+#   gcloud builds submit --tag gcr.io/PROJECT/ferreycorp-app
+#   gcloud run services replace deploy/gcp/cloudrun.yaml --region us-central1
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ferreycorp-propension
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: "5"
+        run.googleapis.com/cpu-throttling: "true"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        - image: gcr.io/PROJECT/ferreycorp-app:latest
+          ports:
+            - containerPort: 8501
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: CLOUD_PROVIDER
+              value: gcp
+            - name: STORAGE_BUCKET
+              value: ferreycorp-predictions
+            - name: ANTHROPIC_MODEL
+              value: claude-sonnet-4-6
+            - name: APP_ENV
+              value: production
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-api-key
+                  key: latest

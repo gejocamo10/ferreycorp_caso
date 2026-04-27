@@ -1,0 +1,41 @@
+# GCP Cloud Run service spec
+# Deploy:
+#   gcloud builds submit --tag gcr.io/PROJECT/ferreycorp-app
+#   gcloud run services replace deploy/gcp/cloudrun.yaml --region us-central1
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ferreycorp-propension
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: "5"
+        run.googleapis.com/cpu-throttling: "true"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        - image: gcr.io/PROJECT/ferreycorp-app:latest
+          ports:
+            - containerPort: 8501
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: CLOUD_PROVIDER
+              value: gcp
+            - name: STORAGE_BUCKET
+              value: ferreycorp-predictions
+            - name: ANTHROPIC_MODEL
+              value: claude-sonnet-4-6
+            - name: APP_ENV
+              value: production
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-api-key
+                  key: latest

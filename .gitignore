@@ -1,0 +1,40 @@
+# ===========================================================
+# Secretos — NUNCA commitear
+# ===========================================================
+.env
+.env.local
+.env.*.local
+
+# ===========================================================
+# Entornos virtuales y artefactos de Python
+# ===========================================================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ===========================================================
+# Sistema operativo / IDE
+# ===========================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# ===========================================================
+# Streamlit
+# ===========================================================
+.streamlit/secrets.toml
+
+# ===========================================================
+# Logs y temporales
+# ===========================================================
+*.log
+/tmp/
+
+# NOTA: data/, models/ y docs/ SÍ se commitean para que el repo
+# sea autocontenido y reproducible por los evaluadores.

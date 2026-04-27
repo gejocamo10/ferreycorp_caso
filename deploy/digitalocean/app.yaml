@@ -1,0 +1,39 @@
+# DigitalOcean App Platform spec
+# Deploy: doctl apps create --spec deploy/digitalocean/app.yaml
+name: ferreycorp-propension
+region: nyc
+
+services:
+  - name: web
+    dockerfile_path: docker/Dockerfile
+    source_dir: /
+    github:
+      repo: <USER>/<REPO>
+      branch: main
+      deploy_on_push: true
+    instance_count: 1
+    instance_size_slug: basic-xs    # 1 vCPU, 1 GB RAM — ~$12/mo
+    http_port: 8501
+    health_check:
+      http_path: /_stcore/health
+    routes:
+      - path: /
+    envs:
+      - key: CLOUD_PROVIDER
+        value: digitalocean
+      - key: STORAGE_BUCKET
+        value: ferreycorp-predictions
+      - key: STORAGE_ENDPOINT
+        value: https://nyc3.digitaloceanspaces.com
+      - key: STORAGE_REGION
+        value: nyc3
+      - key: STORAGE_KEY
+        type: SECRET
+      - key: STORAGE_SECRET
+        type: SECRET
+      - key: ANTHROPIC_API_KEY
+        type: SECRET
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-4-6
+      - key: APP_ENV
+        value: production

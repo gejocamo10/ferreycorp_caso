@@ -1,0 +1,16 @@
+-id : Codigo del cliente
+-dia_visita : Número de día de la visita contando desde 0 (apertura de la tienda)
+-incidencia_compra : 0 si no compró durante la visita, 1 si compró algo
+-id_marca :  identificador de la marca
+-cantidad : Cantidad comprada
+-Ultima_marca_comprada : Ultima marca comprada
+-ultima_cantidad_comprada : ultima_cantidad_comprada
+-precio_marca_x : precio de la marca x
+-promo_marca_x :  Si la marca esta en promoción ese día
+-genero : genero del cliente 
+-estado_civil : estado civil del cliente
+-edad : edad del cliente
+-nivel_educacion : nivel_educacion del cliente
+-ingreso_anual : ingreso anual del cliente
+-ocupacion : ocupacion del cliente
+-tamanio_ciudad : NO CONSIDERAR ESTA VARIABLE 

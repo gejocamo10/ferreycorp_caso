@@ -1,0 +1,41 @@
+{
+  "family": "ferreycorp-propension",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ferreycorp-task-role",
+  "containerDefinitions": [
+    {
+      "name": "web",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/ferreycorp-propension:latest",
+      "portMappings": [{"containerPort": 8501, "protocol": "tcp"}],
+      "essential": true,
+      "environment": [
+        {"name": "CLOUD_PROVIDER", "value": "aws"},
+        {"name": "STORAGE_BUCKET", "value": "ferreycorp-predictions"},
+        {"name": "STORAGE_REGION", "value": "us-east-1"},
+        {"name": "ANTHROPIC_MODEL", "value": "claude-sonnet-4-6"},
+        {"name": "APP_ENV", "value": "production"}
+      ],
+      "secrets": [
+        {"name": "ANTHROPIC_API_KEY", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ferreycorp/anthropic-key"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ferreycorp-propension",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "web"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3
+      }
+    }
+  ]
+}

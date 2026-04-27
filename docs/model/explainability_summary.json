@@ -1,0 +1,14 @@
+{
+  "test_set_size": 8228,
+  "test_base_rate": 0.25182304326689353,
+  "decile_lift_top10pct": 2.3980657449673246,
+  "decile_lift_top20pct": 1.9010823008392874,
+  "confusion_at_0.5": {
+    "tn": 5985,
+    "fp": 171,
+    "fn": 1750,
+    "tp": 322,
+    "precision": 0.6531440162271805,
+    "recall": 0.1554054054054054
+  }
+}
