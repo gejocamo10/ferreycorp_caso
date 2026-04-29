@@ -1,7 +1,7 @@
 """Centralized configuration loaded from environment variables.
 
 Switching cloud providers (DigitalOcean, AWS, GCP) only requires changing
-env vars — never application code.
+env vars, never application code.
 """
 from __future__ import annotations
 
@@ -11,9 +11,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Carga explicita del .env desde la raiz del proyecto para que funcione sin
+# importar el cwd (Streamlit, scripts, tests, contenedores).
+# override=True para que el .env del proyecto gane sobre variables vacias
+# heredadas del shell.
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
 @dataclass
@@ -35,7 +39,7 @@ class Config:
     redis_url: str = os.getenv("REDIS_URL", "")
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
     app_env: str = os.getenv("APP_ENV", "development")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")

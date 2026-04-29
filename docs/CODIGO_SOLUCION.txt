@@ -54,7 +54,7 @@ psycopg2-binary==2.9.9
 sqlalchemy==2.0.31
 redis==5.0.7
 streamlit==1.36.0
-anthropic==0.30.1
+anthropic>=0.40.0
 python-dotenv==1.0.1
 pydantic==2.7.4
 jupyter==1.0.0
@@ -72,7 +72,9 @@ CLOUD_PROVIDER=local
 # Object storage (S3-compatible for DO/AWS, GCS for GCP)
 # ============================================================
 STORAGE_BUCKET=ferreycorp-predictions
-STORAGE_ENDPOINT=                # e.g. https://nyc3.digitaloceanspaces.com (leave empty for AWS/GCP)
+STORAGE_ENDPOINT=
+# Si usas DigitalOcean Spaces, descomenta y usa:
+# STORAGE_ENDPOINT=https://nyc3.digitaloceanspaces.com
 STORAGE_REGION=us-east-1
 STORAGE_KEY=
 STORAGE_SECRET=
@@ -97,7 +99,7 @@ REDIS_URL=redis://localhost:6379/0
 # LLM — Anthropic (Claude)
 # ============================================================
 ANTHROPIC_API_KEY=
-ANTHROPIC_MODEL=claude-sonnet-4-6
+ANTHROPIC_MODEL=claude-sonnet-4-5
 
 # ============================================================
 # App
@@ -142,7 +144,7 @@ CMD ["streamlit", "run", "src/app.py", "--server.port=8501", "--server.address=0
 """Centralized configuration loaded from environment variables.
 
 Switching cloud providers (DigitalOcean, AWS, GCP) only requires changing
-env vars — never application code.
+env vars, never application code.
 """
 from __future__ import annotations
 
@@ -152,9 +154,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Carga explicita del .env desde la raiz del proyecto para que funcione sin
+# importar el cwd (Streamlit, scripts, tests, contenedores).
+# override=True para que el .env del proyecto gane sobre variables vacias
+# heredadas del shell.
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
 @dataclass
@@ -176,7 +182,7 @@ class Config:
     redis_url: str = os.getenv("REDIS_URL", "")
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
     app_env: str = os.getenv("APP_ENV", "development")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
@@ -2261,7 +2267,7 @@ services:
       - key: ANTHROPIC_API_KEY
         type: SECRET
       - key: ANTHROPIC_MODEL
-        value: claude-sonnet-4-6
+        value: claude-sonnet-4-5
       - key: APP_ENV
         value: production
 
@@ -2286,7 +2292,7 @@ services:
         {"name": "CLOUD_PROVIDER", "value": "aws"},
         {"name": "STORAGE_BUCKET", "value": "ferreycorp-predictions"},
         {"name": "STORAGE_REGION", "value": "us-east-1"},
-        {"name": "ANTHROPIC_MODEL", "value": "claude-sonnet-4-6"},
+        {"name": "ANTHROPIC_MODEL", "value": "claude-sonnet-4-5"},
         {"name": "APP_ENV", "value": "production"}
       ],
       "secrets": [
@@ -2346,7 +2352,7 @@ spec:
             - name: STORAGE_BUCKET
               value: ferreycorp-predictions
             - name: ANTHROPIC_MODEL
-              value: claude-sonnet-4-6
+              value: claude-sonnet-4-5
             - name: APP_ENV
               value: production
             - name: ANTHROPIC_API_KEY

@@ -16,7 +16,7 @@
         {"name": "CLOUD_PROVIDER", "value": "aws"},
         {"name": "STORAGE_BUCKET", "value": "ferreycorp-predictions"},
         {"name": "STORAGE_REGION", "value": "us-east-1"},
-        {"name": "ANTHROPIC_MODEL", "value": "claude-sonnet-4-6"},
+        {"name": "ANTHROPIC_MODEL", "value": "claude-sonnet-4-5"},
         {"name": "APP_ENV", "value": "production"}
       ],
       "secrets": [
