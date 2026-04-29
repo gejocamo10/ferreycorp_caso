@@ -1,5 +1,12 @@
 # DigitalOcean App Platform spec
-# Deploy: doctl apps create --spec deploy/digitalocean/app.yaml
+# Deploy CLI:  doctl apps create --spec deploy/digitalocean/app.yaml
+# Deploy UI:   https://cloud.digitalocean.com/apps/new (importar este YAML)
+#
+# Antes de desplegar:
+#   1. Reemplaza <USER>/<REPO> con tu repo de GitHub.
+#   2. Sube data/predictions/predictions.parquet al Space del paso STORAGE_BUCKET.
+#   3. Configura los secretos (STORAGE_KEY, STORAGE_SECRET, ANTHROPIC_API_KEY)
+#      desde la UI tras el primer deploy.
 name: ferreycorp-propension
 region: nyc
 
@@ -12,7 +19,7 @@ services:
       branch: main
       deploy_on_push: true
     instance_count: 1
-    instance_size_slug: basic-xs    # 1 vCPU, 1 GB RAM — ~$12/mo
+    instance_size_slug: basic-xs    # 1 vCPU, 1 GB RAM (alrededor de 12 USD por mes)
     http_port: 8501
     health_check:
       http_path: /_stcore/health
@@ -34,6 +41,6 @@ services:
       - key: ANTHROPIC_API_KEY
         type: SECRET
       - key: ANTHROPIC_MODEL
-        value: claude-sonnet-4-5
+        value: claude-sonnet-4-5-20250929
       - key: APP_ENV
         value: production
