@@ -220,14 +220,84 @@ def page_modelo() -> None:
     metrics_path = Path("docs/metrics/model_metrics.json")
     if metrics_path.exists():
         m = json.loads(metrics_path.read_text())
-        c1, c2, c3, c4 = st.columns(4)
-        lgb = m["lightgbm"]["test"]
-        c1.metric("AUC-ROC (test)", f"{lgb['auc_roc']:.3f}")
-        c2.metric("PR-AUC (test)", f"{lgb['pr_auc']:.3f}")
-        c3.metric("Lift @ top 10%", f"{lgb['lift@10%']:.2f}x")
-        c4.metric("Brier score", f"{lgb['brier']:.3f}")
+        lgb_test = m["lightgbm"]["test"]
 
-        st.json(m, expanded=False)
+        # KPIs principales arriba
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("AUC-ROC (test)", f"{lgb_test['auc_roc']:.3f}")
+        c2.metric("PR-AUC (test)", f"{lgb_test['pr_auc']:.3f}")
+        c3.metric("Lift @ top 10%", f"{lgb_test['lift@10%']:.2f}x")
+        c4.metric("Brier score", f"{lgb_test['brier']:.3f}")
+
+        st.divider()
+        st.subheader("Comparativa de modelos")
+
+        # Tabla comparativa val + test, LogReg vs LightGBM
+        rows = []
+        labels = {
+            "auc_roc": "AUC-ROC",
+            "pr_auc": "PR-AUC",
+            "log_loss": "Log loss",
+            "brier": "Brier score",
+            "lift@10%": "Lift @ top 10%",
+            "lift@20%": "Lift @ top 20%",
+            "lift@30%": "Lift @ top 30%",
+        }
+        for key, label in labels.items():
+            rows.append({
+                "Métrica": label,
+                "LogReg (val)": f"{m['logreg']['val'][key]:.3f}",
+                "LogReg (test)": f"{m['logreg']['test'][key]:.3f}",
+                "LightGBM (val)": f"{m['lightgbm']['val'][key]:.3f}",
+                "LightGBM (test)": f"{m['lightgbm']['test'][key]:.3f}",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.caption("Lift @ top-K mide cuántas veces más compradores hay en el top-K% por score vs. la población general. Es la métrica que más importa para campañas dirigidas.")
+
+        # Configuración del split
+        st.divider()
+        st.subheader("Configuración del experimento")
+        split = m.get("split", {})
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Filas train", f"{split.get('n_train', 0):,}")
+        c2.metric("Filas validación", f"{split.get('n_val', 0):,}")
+        c3.metric("Filas test", f"{split.get('n_test', 0):,}")
+        st.caption(
+            f"Split temporal: train hasta día {split.get('train_days_end')}, "
+            f"validación hasta día {split.get('val_days_end')}, test el resto. "
+            f"Total de features: {m.get('feature_count', 'N/D')}."
+        )
+
+        # Hiperparametros encontrados por Optuna
+        best_params = m["lightgbm"].get("best_params", {})
+        if best_params:
+            st.divider()
+            st.subheader("Hiperparámetros optimizados (Optuna, 30 trials)")
+            param_rows = []
+            descriptions = {
+                "num_leaves": "Cantidad máxima de hojas por árbol",
+                "max_depth": "Profundidad máxima de cada árbol",
+                "learning_rate": "Tasa de aprendizaje (paso del boosting)",
+                "feature_fraction": "Fracción de features muestreadas por árbol",
+                "bagging_fraction": "Fracción de filas muestreadas por árbol",
+                "bagging_freq": "Cada cuántas iteraciones se hace bagging",
+                "min_child_samples": "Mínimo de muestras en una hoja",
+                "lambda_l1": "Regularización L1 (sparsity)",
+                "lambda_l2": "Regularización L2 (suavidad)",
+            }
+            for k, v in best_params.items():
+                val = f"{v:.4f}" if isinstance(v, float) else str(v)
+                param_rows.append({
+                    "Hiperparámetro": k,
+                    "Valor óptimo": val,
+                    "Qué controla": descriptions.get(k, ""),
+                })
+            param_rows.append({
+                "Hiperparámetro": "best_iteration",
+                "Valor óptimo": str(m["lightgbm"].get("best_iteration", "N/D")),
+                "Qué controla": "Cantidad de árboles construidos antes de early stopping",
+            })
+            st.dataframe(pd.DataFrame(param_rows), hide_index=True, use_container_width=True)
 
     st.divider()
     st.subheader("Curva de ganancia (Lift Curve)")
