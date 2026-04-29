@@ -233,19 +233,19 @@ def page_modelo() -> None:
     st.subheader("Curva de ganancia (Lift Curve)")
     img = Path("docs/model/figures/lift_curve.png")
     if img.exists():
-        st.image(str(img), use_container_width=True)
+        st.image(str(img), use_column_width=True)
 
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Importancia de features (SHAP)")
         img = Path("docs/model/figures/shap_importance.png")
         if img.exists():
-            st.image(str(img), use_container_width=True)
+            st.image(str(img), use_column_width=True)
     with col_b:
         st.subheader("Calibración")
         img = Path("docs/model/figures/calibration.png")
         if img.exists():
-            st.image(str(img), use_container_width=True)
+            st.image(str(img), use_column_width=True)
 
 
 # Router
