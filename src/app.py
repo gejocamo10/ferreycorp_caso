@@ -23,13 +23,12 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import json
 
-import duckdb
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 from src.agent.agent import PropensityAgent
-from src.agent.tools import _predictions_uri
+from src.agent.tools import _predictions_uri, get_conn
 from src.config import config
 
 st.set_page_config(page_title="Ferreycorp · Propensión de Compra", layout="wide", page_icon="🎯")
@@ -40,7 +39,11 @@ st.set_page_config(page_title="Ferreycorp · Propensión de Compra", layout="wid
 # ============================================================
 @st.cache_data(ttl=300)
 def load_predictions() -> pd.DataFrame:
-    return duckdb.sql(f"SELECT * FROM read_parquet('{_predictions_uri()}')").df()
+    conn = get_conn()
+    try:
+        return conn.execute(f"SELECT * FROM read_parquet('{_predictions_uri()}')").fetchdf()
+    finally:
+        conn.close()
 
 
 @st.cache_resource
