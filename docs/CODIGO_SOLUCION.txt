@@ -100,12 +100,31 @@ REDIS_URL=redis://localhost:6379/0
 # ============================================================
 ANTHROPIC_API_KEY=
 ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
+ANTHROPIC_TIMEOUT_SECONDS=30
 
 # ============================================================
 # App
 # ============================================================
 APP_ENV=development
 LOG_LEVEL=INFO
+
+--------------------------------------------------------------------------------
+# Archivo: .dockerignore
+--------------------------------------------------------------------------------
+.git
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+.DS_Store
+.env
+
+data/raw
+data/processed
+data/predictions
+
+docs/**/*.pdf
+docs/eda/figures
 
 --------------------------------------------------------------------------------
 # Archivo: docker/Dockerfile
@@ -122,8 +141,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # build-essential y libgomp1 son necesarios para compilar e invocar LightGBM.
+# curl se usa en health checks de ECS/App Runner.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -132,6 +153,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY src/ ./src/
 COPY models/ ./models/
+COPY docs/ ./docs/
 
 EXPOSE 8501
 
@@ -186,7 +208,8 @@ class Config:
     redis_url: str = os.getenv("REDIS_URL", "")
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+    anthropic_timeout_seconds: float = float(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "30"))
 
     app_env: str = os.getenv("APP_ENV", "development")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
@@ -1933,7 +1956,10 @@ class PropensityAgent:
     def __post_init__(self) -> None:
         if not config.anthropic_api_key:
             raise RuntimeError("ANTHROPIC_API_KEY no esta configurada. Agregala en el archivo .env.")
-        self.client = Anthropic(api_key=config.anthropic_api_key)
+        self.client = Anthropic(
+            api_key=config.anthropic_api_key,
+            timeout=config.anthropic_timeout_seconds,
+        )
 
     def chat(self, user_message: str, history: list[dict] | None = None) -> dict[str, Any]:
         messages = list(history or [])
@@ -2407,7 +2433,7 @@ services:
     dockerfile_path: docker/Dockerfile
     source_dir: /
     github:
-      repo: <USER>/<REPO>
+      repo: gejocamo10/ferreycorp_caso
       branch: main
       deploy_on_push: true
     instance_count: 1
@@ -2434,6 +2460,8 @@ services:
         type: SECRET
       - key: ANTHROPIC_MODEL
         value: claude-sonnet-4-5-20250929
+      - key: ANTHROPIC_TIMEOUT_SECONDS
+        value: "30"
       - key: APP_ENV
         value: production
 
@@ -2458,7 +2486,8 @@ services:
         {"name": "CLOUD_PROVIDER", "value": "aws"},
         {"name": "STORAGE_BUCKET", "value": "ferreycorp-predictions"},
         {"name": "STORAGE_REGION", "value": "us-east-1"},
-        {"name": "ANTHROPIC_MODEL", "value": "claude-sonnet-4-5"},
+        {"name": "ANTHROPIC_MODEL", "value": "claude-sonnet-4-5-20250929"},
+        {"name": "ANTHROPIC_TIMEOUT_SECONDS", "value": "30"},
         {"name": "APP_ENV", "value": "production"}
       ],
       "secrets": [
@@ -2480,6 +2509,80 @@ services:
       }
     }
   ]
+}
+
+--------------------------------------------------------------------------------
+# Archivo: deploy/aws/ecs-service.json
+--------------------------------------------------------------------------------
+{
+  "cluster": "ferreycorp-cluster",
+  "serviceName": "ferreycorp-propension",
+  "taskDefinition": "ferreycorp-propension",
+  "desiredCount": 1,
+  "launchType": "FARGATE",
+  "platformVersion": "LATEST",
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": [
+        "subnet-REPLACE_ME_1",
+        "subnet-REPLACE_ME_2"
+      ],
+      "securityGroups": [
+        "sg-REPLACE_ME"
+      ],
+      "assignPublicIp": "ENABLED"
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:<REGION>:<ACCOUNT_ID>:targetgroup/ferreycorp-propension/REPLACE_ME",
+      "containerName": "web",
+      "containerPort": 8501
+    }
+  ]
+}
+
+--------------------------------------------------------------------------------
+# Archivo: deploy/aws/apprunner.json
+--------------------------------------------------------------------------------
+{
+  "ServiceName": "ferreycorp-propension",
+  "SourceConfiguration": {
+    "AuthenticationConfiguration": {
+      "AccessRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/AppRunnerECRAccessRole"
+    },
+    "ImageRepository": {
+      "ImageIdentifier": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/ferreycorp-propension:latest",
+      "ImageRepositoryType": "ECR",
+      "ImageConfiguration": {
+        "Port": "8501",
+        "RuntimeEnvironmentVariables": {
+          "CLOUD_PROVIDER": "aws",
+          "STORAGE_BUCKET": "ferreycorp-predictions",
+          "STORAGE_REGION": "us-east-1",
+          "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+          "ANTHROPIC_TIMEOUT_SECONDS": "30",
+          "APP_ENV": "production"
+        },
+        "RuntimeEnvironmentSecrets": {
+          "ANTHROPIC_API_KEY": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ferreycorp/anthropic-key"
+        }
+      }
+    },
+    "AutoDeploymentsEnabled": true
+  },
+  "InstanceConfiguration": {
+    "Cpu": "0.5 vCPU",
+    "Memory": "1 GB"
+  },
+  "HealthCheckConfiguration": {
+    "Protocol": "HTTP",
+    "Path": "/_stcore/health",
+    "Interval": 10,
+    "Timeout": 5,
+    "HealthyThreshold": 1,
+    "UnhealthyThreshold": 5
+  }
 }
 
 --------------------------------------------------------------------------------
@@ -2518,7 +2621,9 @@ spec:
             - name: STORAGE_BUCKET
               value: ferreycorp-predictions
             - name: ANTHROPIC_MODEL
-              value: claude-sonnet-4-5
+              value: claude-sonnet-4-5-20250929
+            - name: ANTHROPIC_TIMEOUT_SECONDS
+              value: "30"
             - name: APP_ENV
               value: production
             - name: ANTHROPIC_API_KEY

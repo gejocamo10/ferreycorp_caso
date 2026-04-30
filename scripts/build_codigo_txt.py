@@ -19,6 +19,7 @@ FILES = [
     ("Configuración y dependencias", [
         "requirements.txt",
         ".env.example",
+        ".dockerignore",
         "docker/Dockerfile",
         "src/config.py",
     ]),
@@ -48,6 +49,8 @@ FILES = [
     ("Specs de despliegue cloud", [
         "deploy/digitalocean/app.yaml",
         "deploy/aws/ecs-task.json",
+        "deploy/aws/ecs-service.json",
+        "deploy/aws/apprunner.json",
         "deploy/gcp/cloudrun.yaml",
     ]),
 ]

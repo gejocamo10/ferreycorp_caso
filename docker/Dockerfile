@@ -10,8 +10,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # build-essential y libgomp1 son necesarios para compilar e invocar LightGBM.
+# curl se usa en health checks de ECS/App Runner.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -20,6 +22,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY src/ ./src/
 COPY models/ ./models/
+COPY docs/ ./docs/
 
 EXPOSE 8501
 

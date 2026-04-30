@@ -1,0 +1,27 @@
+{
+  "cluster": "ferreycorp-cluster",
+  "serviceName": "ferreycorp-propension",
+  "taskDefinition": "ferreycorp-propension",
+  "desiredCount": 1,
+  "launchType": "FARGATE",
+  "platformVersion": "LATEST",
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": [
+        "subnet-REPLACE_ME_1",
+        "subnet-REPLACE_ME_2"
+      ],
+      "securityGroups": [
+        "sg-REPLACE_ME"
+      ],
+      "assignPublicIp": "ENABLED"
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:<REGION>:<ACCOUNT_ID>:targetgroup/ferreycorp-propension/REPLACE_ME",
+      "containerName": "web",
+      "containerPort": 8501
+    }
+  ]
+}

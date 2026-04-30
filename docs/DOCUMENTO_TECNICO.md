@@ -189,7 +189,7 @@ Top features por impacto promedio:
 Usuario: "Dame los 20 clientes top de Leales premium con score mayor a 0.5"
    │
    ▼
-Claude (sonnet-4-6) interpreta y emite tool call:
+Claude Sonnet vía Anthropic API interpreta y emite tool call:
    {
      "name": "query_predictions",
      "input": {

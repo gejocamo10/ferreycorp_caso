@@ -43,7 +43,7 @@ ferreycorp_caso/
 ├── docker/Dockerfile        # Container portable (DO, AWS, GCP)
 ├── deploy/
 │   ├── digitalocean/        # App Platform spec
-│   ├── aws/                 # ECS y App Runner specs
+│   ├── aws/                 # ECS Fargate y App Runner specs
 │   └── gcp/                 # Cloud Run spec
 ├── docs/
 │   ├── eda/                 # Reporte EDA y 11 figuras
@@ -137,28 +137,44 @@ Costo estimado: aprox. $25 por mes (App Platform basic, Spaces y Managed Redis o
 ### AWS
 
 ```bash
-# Subir Parquet
+# 1. Subir Parquet
 aws s3 cp data/predictions/predictions.parquet s3://ferreycorp-predictions/
 
-# Desplegar en ECS Fargate
+# 2. Crear secreto del LLM
+aws secretsmanager create-secret \
+  --name ferreycorp/anthropic-key \
+  --secret-string "$ANTHROPIC_API_KEY"
+
+# 3. Build/push de la imagen a ECR
+aws ecr create-repository --repository-name ferreycorp-propension
+docker build -f docker/Dockerfile -t ferreycorp-propension .
+docker tag ferreycorp-propension:latest <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/ferreycorp-propension:latest
+docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/ferreycorp-propension:latest
+
+# 4A. Desplegar en ECS Fargate
 aws ecs register-task-definition --cli-input-json file://deploy/aws/ecs-task.json
 aws ecs create-service --cli-input-json file://deploy/aws/ecs-service.json
 
-# Alternativa más simple: AWS App Runner
+# 4B. Alternativa más simple: AWS App Runner
 aws apprunner create-service --cli-input-json file://deploy/aws/apprunner.json
 ```
 
 ### GCP
 
 ```bash
-# Subir Parquet
+# 1. Subir Parquet
 gsutil cp data/predictions/predictions.parquet gs://ferreycorp-predictions/
 
-# Build y deploy en Cloud Run
+# 2. Crear secreto del LLM
+printf "%s" "$ANTHROPIC_API_KEY" | gcloud secrets create anthropic-api-key --data-file=-
+
+# 3. Build y deploy en Cloud Run
 gcloud builds submit --tag gcr.io/PROJECT/ferreycorp-app
-gcloud run deploy ferreycorp-app --image gcr.io/PROJECT/ferreycorp-app \
-    --env-vars-file deploy/gcp/cloudrun-env.yaml \
-    --region us-central1 --allow-unauthenticated
+gcloud run services replace deploy/gcp/cloudrun.yaml --region us-central1
+gcloud run services add-iam-policy-binding ferreycorp-propension \
+    --region us-central1 \
+    --member="allUsers" \
+    --role="roles/run.invoker"
 ```
 
 ## 🎯 Resultados clave

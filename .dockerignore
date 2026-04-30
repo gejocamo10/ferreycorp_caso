@@ -1,0 +1,14 @@
+.git
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+.DS_Store
+.env
+
+data/raw
+data/processed
+data/predictions
+
+docs/**/*.pdf
+docs/eda/figures

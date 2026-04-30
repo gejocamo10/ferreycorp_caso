@@ -173,7 +173,10 @@ class PropensityAgent:
     def __post_init__(self) -> None:
         if not config.anthropic_api_key:
             raise RuntimeError("ANTHROPIC_API_KEY no esta configurada. Agregala en el archivo .env.")
-        self.client = Anthropic(api_key=config.anthropic_api_key)
+        self.client = Anthropic(
+            api_key=config.anthropic_api_key,
+            timeout=config.anthropic_timeout_seconds,
+        )
 
     def chat(self, user_message: str, history: list[dict] | None = None) -> dict[str, Any]:
         messages = list(history or [])

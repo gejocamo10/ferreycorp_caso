@@ -1,0 +1,39 @@
+{
+  "ServiceName": "ferreycorp-propension",
+  "SourceConfiguration": {
+    "AuthenticationConfiguration": {
+      "AccessRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/AppRunnerECRAccessRole"
+    },
+    "ImageRepository": {
+      "ImageIdentifier": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/ferreycorp-propension:latest",
+      "ImageRepositoryType": "ECR",
+      "ImageConfiguration": {
+        "Port": "8501",
+        "RuntimeEnvironmentVariables": {
+          "CLOUD_PROVIDER": "aws",
+          "STORAGE_BUCKET": "ferreycorp-predictions",
+          "STORAGE_REGION": "us-east-1",
+          "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+          "ANTHROPIC_TIMEOUT_SECONDS": "30",
+          "APP_ENV": "production"
+        },
+        "RuntimeEnvironmentSecrets": {
+          "ANTHROPIC_API_KEY": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ferreycorp/anthropic-key"
+        }
+      }
+    },
+    "AutoDeploymentsEnabled": true
+  },
+  "InstanceConfiguration": {
+    "Cpu": "0.5 vCPU",
+    "Memory": "1 GB"
+  },
+  "HealthCheckConfiguration": {
+    "Protocol": "HTTP",
+    "Path": "/_stcore/health",
+    "Interval": 10,
+    "Timeout": 5,
+    "HealthyThreshold": 1,
+    "UnhealthyThreshold": 5
+  }
+}

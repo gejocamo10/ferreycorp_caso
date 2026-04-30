@@ -42,7 +42,8 @@ class Config:
     redis_url: str = os.getenv("REDIS_URL", "")
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+    anthropic_timeout_seconds: float = float(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "30"))
 
     app_env: str = os.getenv("APP_ENV", "development")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")

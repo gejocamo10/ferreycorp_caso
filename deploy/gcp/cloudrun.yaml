@@ -31,7 +31,9 @@ spec:
             - name: STORAGE_BUCKET
               value: ferreycorp-predictions
             - name: ANTHROPIC_MODEL
-              value: claude-sonnet-4-5
+              value: claude-sonnet-4-5-20250929
+            - name: ANTHROPIC_TIMEOUT_SECONDS
+              value: "30"
             - name: APP_ENV
               value: production
             - name: ANTHROPIC_API_KEY

@@ -42,5 +42,7 @@ services:
         type: SECRET
       - key: ANTHROPIC_MODEL
         value: claude-sonnet-4-5-20250929
+      - key: ANTHROPIC_TIMEOUT_SECONDS
+        value: "30"
       - key: APP_ENV
         value: production
