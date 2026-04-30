@@ -15,7 +15,7 @@ services:
     dockerfile_path: docker/Dockerfile
     source_dir: /
     github:
-      repo: <USER>/<REPO>
+      repo: gejocamo10/ferreycorp_caso
       branch: main
       deploy_on_push: true
     instance_count: 1
