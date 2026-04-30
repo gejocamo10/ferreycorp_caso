@@ -1,6 +1,11 @@
-"""Streamlit app — chat con el agente + dashboard de predicciones.
+"""Aplicacion Streamlit del producto.
 
-Run:
+Tres vistas:
+  - Chat con el agente conversacional (preguntas en lenguaje natural).
+  - Dashboard de predicciones (KPIs y graficos por decil y segmento).
+  - Modelo (metricas de performance, hiperparametros, SHAP, calibracion).
+
+Para ejecutar:
     streamlit run src/app.py
 """
 from __future__ import annotations
@@ -8,9 +13,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Streamlit ejecuta este archivo como script (no como módulo), por lo que la raíz
-# del proyecto no está en sys.path y los imports `from src.X` fallarían. Esto lo
-# arregla sin importar desde dónde se invoque streamlit.
+# Streamlit ejecuta este archivo como script y no como modulo, por lo que la
+# raiz del proyecto no esta en sys.path y los imports `from src.X` fallarian.
+# Inserto la raiz manualmente para que la app funcione sin importar desde
+# donde se invoque streamlit.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -96,7 +102,7 @@ def page_chat() -> None:
                 with st.expander(f"🔍 {sum(1 for s in msg['trace'] if s['kind']=='tool_call')} tool call(s)"):
                     for step in msg["trace"]:
                         if step["kind"] == "tool_call":
-                            st.markdown(f"**→ {step['name']}**")
+                            st.markdown(f"**llamada a {step['name']}**")
                             st.json(step["payload"], expanded=False)
                         elif step["kind"] == "tool_result":
                             st.markdown(f"**← resultado de {step['name']}**")
@@ -115,7 +121,7 @@ def page_chat() -> None:
     if user_input:
         agent = get_agent()
         if agent is None:
-            st.error("Agente no inicializado — falta ANTHROPIC_API_KEY.")
+            st.error("Agente no inicializado: falta ANTHROPIC_API_KEY en el .env.")
             return
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):

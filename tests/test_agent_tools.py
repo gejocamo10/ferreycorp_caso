@@ -1,6 +1,6 @@
-"""Tests del módulo de tools del agente.
+"""Pruebas del modulo de tools del agente.
 
-Verifica que la whitelist de columnas/operadores funciona correctamente
+Verifica que la whitelist de columnas y operadores funciona
 y que las queries devuelven resultados consistentes.
 """
 from __future__ import annotations
@@ -33,12 +33,12 @@ def test_query_basic_filter() -> None:
 
 
 def test_query_rejects_unknown_column() -> None:
-    with pytest.raises(ValueError, match="Column not allowed"):
+    with pytest.raises(ValueError, match="Columna no permitida"):
         query_predictions(filters=[{"column": "drop_table", "operator": "=", "value": 1}])
 
 
 def test_query_rejects_unknown_operator() -> None:
-    with pytest.raises(ValueError, match="Operator not allowed"):
+    with pytest.raises(ValueError, match="Operador no permitido"):
         query_predictions(filters=[{"column": "edad", "operator": "DROP", "value": 1}])
 
 
@@ -87,7 +87,7 @@ def test_top_decile_has_higher_score() -> None:
 
 
 def test_aggregate_rejects_unknown_function() -> None:
-    with pytest.raises(ValueError, match="Agg function not allowed"):
+    with pytest.raises(ValueError, match="Funcion de agregacion no permitida"):
         aggregate_predictions(
             aggregations=[{"function": "DROP", "column": "id"}],
         )

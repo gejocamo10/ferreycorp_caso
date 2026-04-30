@@ -1,9 +1,18 @@
-"""Train propensity models — Logistic Regression baseline + LightGBM tuned with Optuna.
+"""Entrenamiento de los modelos de propension de compra.
 
-Temporal split (no random shuffling): train < day 510, val 510-619, test 620-730.
-Target: incidencia_compra.
+Entrena dos modelos: una Regresion Logistica como baseline y un LightGBM
+tuneado con Optuna como modelo principal. Usa split temporal (no aleatorio)
+para evitar que el modelo vea dias futuros del mismo cliente, lo que seria
+data leakage.
 
-Run:
+Particion temporal:
+  train      : dias 1 a 509   (alrededor del 70 por ciento)
+  validacion : dias 510 a 619 (alrededor del 15 por ciento)
+  test       : dias 620 a 730 (alrededor del 15 por ciento)
+
+Target: incidencia_compra (0 o 1).
+
+Para ejecutar:
     python -m src.model.train
 """
 from __future__ import annotations
@@ -52,7 +61,10 @@ def temporal_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
 
 
 def lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k: float = 0.10) -> float:
-    """Lift @ top-K: among the top-K% scored, what's the purchase rate vs. baseline."""
+    """Lift @ top-K: cuantas veces mayor es la tasa de compra entre el top
+    K por ciento de clientes scoreados versus la tasa base de la poblacion.
+    Es la metrica clave para decidir a quien llamar en una campaña.
+    """
     n = len(y_true)
     cutoff = int(np.ceil(n * k))
     order = np.argsort(-y_score)
@@ -120,7 +132,9 @@ def tune_lgbm(X_train, y_train, X_val, y_val, cat_idx: list[int], n_trials: int 
 
 
 def train_lgbm_final(X_trval, y_trval, X_val, y_val, cat_idx, best_params) -> lgb.Booster:
-    """Refit on train+val combined for final model (use val for early-stop signal still)."""
+    """Reentrena LightGBM usando los mejores hiperparametros encontrados
+    por Optuna y deja a la validacion como senal para early stopping.
+    """
     params = {"objective": "binary", "metric": "auc", "verbosity": -1, **best_params}
     train_set = lgb.Dataset(X_trval, label=y_trval, categorical_feature=cat_idx)
     val_set = lgb.Dataset(X_val, label=y_val, categorical_feature=cat_idx, reference=train_set)
@@ -135,13 +149,13 @@ def train_lgbm_final(X_trval, y_trval, X_val, y_val, cat_idx, best_params) -> lg
 
 
 def main() -> None:
-    print("Loading features...")
+    print("Cargando features...")
     df = pd.read_parquet(PROCESSED / "features.parquet")
     print(f"  shape={df.shape}")
 
     train, val, test = temporal_split(df)
     print(f"  train: {len(train):,}  val: {len(val):,}  test: {len(test):,}")
-    print(f"  train base rate: {train[TARGET].mean():.3f}  val: {val[TARGET].mean():.3f}  test: {test[TARGET].mean():.3f}")
+    print(f"  base rate: train={train[TARGET].mean():.3f}  val={val[TARGET].mean():.3f}  test={test[TARGET].mean():.3f}")
 
     X_train, y_train = train[FEATURE_COLUMNS], train[TARGET]
     X_val, y_val = val[FEATURE_COLUMNS], val[TARGET]
@@ -154,9 +168,9 @@ def main() -> None:
     cat_idx = [FEATURE_COLUMNS.index(c) for c in CATEGORICAL_FEATURES]
 
     # ============================================================
-    # Baseline: Logistic Regression
+    # Baseline con Regresion Logistica
     # ============================================================
-    print("\n[1/3] Training Logistic Regression baseline...")
+    print("\n[1/3] Entrenando baseline (Regresion Logistica)...")
     X_train_lr = X_train.copy()
     X_val_lr = X_val.copy()
     X_test_lr = X_test.copy()
@@ -169,11 +183,11 @@ def main() -> None:
     print(f"  LR val AUC={lr_val['auc_roc']:.4f}  test AUC={lr_test['auc_roc']:.4f}  lift@10={lr_test['lift@10%']:.2f}")
 
     # ============================================================
-    # LightGBM with Optuna tuning
+    # LightGBM tuneado con Optuna
     # ============================================================
-    print("\n[2/3] Tuning LightGBM with Optuna (30 trials)...")
+    print("\n[2/3] Tuneando LightGBM con Optuna (30 trials)...")
     best_params = tune_lgbm(X_train, y_train, X_val, y_val, cat_idx, n_trials=30)
-    print(f"  best params: {best_params}")
+    print(f"  Mejores hiperparametros: {best_params}")
 
     booster = train_lgbm_final(X_train, y_train, X_val, y_val, cat_idx, best_params)
     val_proba = booster.predict(X_val, num_iteration=booster.best_iteration)
@@ -183,9 +197,9 @@ def main() -> None:
     print(f"  LightGBM val AUC={lgb_val['auc_roc']:.4f}  test AUC={lgb_test['auc_roc']:.4f}  lift@10={lgb_test['lift@10%']:.2f}")
 
     # ============================================================
-    # Save
+    # Guardar modelos y metricas
     # ============================================================
-    print("\n[3/3] Saving models and metrics...")
+    print("\n[3/3] Guardando modelos y metricas...")
     booster.save_model(str(MODELS_DIR / "lgbm_propensity.txt"))
     joblib.dump(lr_model, MODELS_DIR / "logreg_propensity.joblib")
     joblib.dump({"feature_columns": FEATURE_COLUMNS, "categorical": CATEGORICAL_FEATURES}, MODELS_DIR / "feature_schema.joblib")
@@ -198,8 +212,8 @@ def main() -> None:
     }
     (METRICS_DIR / "model_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
-    print("\n=== FINAL TEST METRICS ===")
-    print(f"{'Metric':<15} {'LogReg':>10} {'LightGBM':>10}")
+    print("\n=== Metricas finales en test ===")
+    print(f"{'Metrica':<15} {'LogReg':>10} {'LightGBM':>10}")
     for k in ["auc_roc", "pr_auc", "log_loss", "brier", "lift@10%", "lift@20%", "lift@30%"]:
         print(f"{k:<15} {lr_test[k]:>10.4f} {lgb_test[k]:>10.4f}")
 

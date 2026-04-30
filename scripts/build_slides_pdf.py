@@ -1,9 +1,9 @@
-"""Genera SLIDES.pdf con formato real de presentación: A4 horizontal,
-una slide por página, fuentes grandes, paleta consistente.
+"""Genera docs/SLIDES.pdf con formato real de presentacion: A4 horizontal,
+una slide por pagina, fuentes grandes y paleta consistente.
 
-El brief pide "Presentación de slides - Formato pdf (máx. 7 slides)".
+El brief pide "Presentacion de slides en formato PDF (maximo 7 slides)".
 
-Run:
+Para ejecutar:
     python scripts/build_slides_pdf.py
 """
 from __future__ import annotations
@@ -114,7 +114,7 @@ SLIDES_HTML = """
 
   <h2>Objetivos</h2>
   <h3>Objetivo de negocio</h3>
-  <p>Predecir, en cada visita, qué clientes comprarán — y permitir al equipo comercial
+  <p>Predecir, en cada visita, qué clientes comprarán, y permitir al equipo comercial
   <b>filtrar y explorar las predicciones en lenguaje natural</b>.</p>
 
   <h3>Objetivos técnicos</h3>
@@ -172,7 +172,7 @@ SLIDES_HTML = """
     <thead><tr><th>Hallazgo</th><th>Implicación para el modelo</th></tr></thead>
     <tbody>
       <tr><td><b>89%</b> de clientes concentran &gt;50% de compras en una marca</td>
-          <td>Lealtad histórica → feature top</td></tr>
+          <td>Lealtad histórica como feature top</td></tr>
       <tr><td><b>+23%</b> de lift cuando hay promo (26.9% vs 21.8%)</td>
           <td>Promo es palanca de primer orden</td></tr>
       <tr><td>Marcas 5 y 2 dominan (<b>65%</b>) · Marca 3 nicho (5.7%)</td>
@@ -190,9 +190,9 @@ SLIDES_HTML = """
   <div class="slide-num">4 / 7</div>
   <h1>Metodología de la solución</h1>
 
-  <pre>EDA → Feature Engineering Causal → Train Temporal Split → Tuning → Score → Agent</pre>
+  <pre>EDA, Feature Engineering Causal, Train Temporal Split, Tuning, Score, Agent</pre>
 
-  <h2>Features (43 totales) — sin leakage</h2>
+  <h2>Features (43 totales) sin leakage</h2>
   <ul>
     <li><b>RFM</b>: recencia, frecuencia, ticket promedio histórico</li>
     <li><b>Lealtad</b>: % histórico de compras por marca (5 columnas)</li>
@@ -244,7 +244,7 @@ SLIDES_HTML = """
   </table>
 
   <h3>Seguridad del agente</h3>
-  <p>El LLM <b>NO escribe SQL libre</b> — emite filtros estructurados que se validan
+  <p>El LLM <b>NO escribe SQL libre</b>, emite filtros estructurados que se validan
   contra una whitelist de columnas/operadores antes de generar SQL parametrizado.</p>
 </div>
 
@@ -266,7 +266,7 @@ SLIDES_HTML = """
     </tr></tbody>
   </table>
 
-  <h2>Análisis por decil — el dato que cuenta al negocio</h2>
+  <h2>Análisis por decil, el dato que cuenta al negocio</h2>
   <table>
     <thead><tr><th>Decil</th><th>n</th><th>Score predicho</th><th>Tasa real</th><th>Lift vs base</th></tr></thead>
     <tbody>
@@ -278,7 +278,7 @@ SLIDES_HTML = """
     </tbody>
   </table>
 
-  <p>→ Llamando solo al <b>top 20%</b>, capturas <b>~38% de las compras totales</b>.</p>
+  <p>Llamando solo al <b>top 20%</b>, se capturan aprox. <b>38% de las compras totales</b>.</p>
 
   <h3>Top features (SHAP)</h3>
   <p>prior_buy_rate · prior_purchases · recency_days · min_rel_price_today · loyal_brand_on_promo</p>
@@ -300,15 +300,15 @@ SLIDES_HTML = """
       <tr><td>♻️ Reactivación</td><td>Detectar baja-propensión activa</td>
           <td>Tasa reactivación: <b>+10pp</b></td></tr>
       <tr><td>⚡ Operación comercial</td><td>Self-service vía chat IA</td>
-          <td>Time-to-insight: horas → segundos</td></tr>
+          <td>Time-to-insight: de horas a segundos</td></tr>
     </tbody>
   </table>
 
-  <h2>Modelo económico — campaña al top-20% por score</h2>
+  <h2>Modelo económico, campaña al top-20% por score</h2>
   <ul>
     <li>⬇ <b>80%</b> menos costo de contacto vs. campaña masiva</li>
     <li>✅ Mantiene <b>38%</b> de la efectividad de la campaña masiva</li>
-    <li>→ Rentabilidad por contacto <b>~5×</b> vs. baseline</li>
+    <li>Rentabilidad por contacto aprox. <b>5 veces</b> vs. baseline</li>
   </ul>
 
   <h3>Roadmap de extensiones</h3>

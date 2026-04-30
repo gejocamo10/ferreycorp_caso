@@ -1,9 +1,11 @@
-"""Conversational agent — Claude (Anthropic) + tool use over the predictions table.
+"""Agente conversacional, Claude (Anthropic) con tool use sobre la tabla de predicciones.
 
-The LLM doesn't write SQL directly. It calls structured tools whose arguments are
-validated against a column whitelist before being translated to parameterized SQL.
+El LLM no escribe SQL libre. Llama a herramientas estructuradas cuyos argumentos
+se validan contra una whitelist de columnas y operadores antes de traducirse a
+SQL parametrizado en DuckDB. Eso elimina el riesgo de inyeccion y hace la
+solucion testeable y predecible.
 
-Public API:
+API publica:
     PropensityAgent().chat(user_message, history) -> {"reply": str, "trace": [...]}
 """
 from __future__ import annotations
@@ -30,7 +32,7 @@ Tu trabajo:
 4. Cuando sea relevante, sugerir KPIs o acciones (ej: campañas dirigidas al decil top, ofertas a cazadores de oferta).
 
 Reglas importantes:
-- NO inventes números — SIEMPRE consulta primero antes de afirmar.
+- NO inventes numeros, SIEMPRE consulta primero antes de afirmar.
 - Si el usuario pide un listado, usa query_predictions con un limit razonable (ej: 20-50).
 - Si el usuario pide totales o promedios por grupo, usa aggregate_predictions con group_by.
 - Si no estás seguro de qué columna usar, llama a schema_info primero.
@@ -170,7 +172,7 @@ class PropensityAgent:
 
     def __post_init__(self) -> None:
         if not config.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+            raise RuntimeError("ANTHROPIC_API_KEY no esta configurada. Agregala en el archivo .env.")
         self.client = Anthropic(api_key=config.anthropic_api_key)
 
     def chat(self, user_message: str, history: list[dict] | None = None) -> dict[str, Any]:

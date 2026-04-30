@@ -1,10 +1,10 @@
-"""Concatena todo el código fuente en un único archivo TXT entregable.
+"""Concatena todo el codigo fuente en un unico archivo TXT entregable.
 
-El brief de Ferreycorp pide: "Código de la solución – Formato word o txt".
-Este script genera CODIGO_SOLUCION.txt con todos los archivos relevantes,
-con separadores claros y cabecera de cada archivo.
+El brief pide "Codigo de la solucion en formato word o txt". Este script
+genera docs/CODIGO_SOLUCION.txt con los archivos relevantes en orden de
+lectura, separadores claros y cabecera por archivo.
 
-Run:
+Para ejecutar:
     python scripts/build_codigo_txt.py
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "CODIGO_SOLUCION.txt"
 
-# Orden de archivos pensado para lectura: config → datos → modelo → storage → agente → UI
+# Orden de archivos pensado para lectura: config, datos, modelo, storage, agente, UI
 FILES = [
     ("Configuración y dependencias", [
         "requirements.txt",
@@ -54,7 +54,7 @@ FILES = [
 
 
 HEADER = """================================================================================
- CASO FERREYCORP — MODELO DE PROPENSIÓN DE COMPRA + AGENTE IA
+ CASO FERREYCORP, MODELO DE PROPENSIÓN DE COMPRA + AGENTE IA
  Código de la solución (consolidado)
 ================================================================================
 
@@ -62,13 +62,13 @@ Este documento contiene todo el código fuente de la solución, organizado
 por componentes para facilitar la lectura.
 
 Estructura del repositorio:
-  - data/raw/         → CSV original
-  - data/processed/   → Features y segmentos (Parquet)
-  - data/predictions/ → Predicciones del modelo (consumidas por el agente)
-  - docs/             → EDA, documento técnico, slides
-  - models/           → Modelos serializados (LightGBM, LogReg)
-  - src/              → Código fuente (este documento)
-  - deploy/           → Specs DigitalOcean / AWS / GCP
+  - data/raw/         (CSV original)
+  - data/processed/   (features y segmentos en Parquet)
+  - data/predictions/ (predicciones del modelo, consumidas por el agente)
+  - docs/             (EDA, documento tecnico, slides)
+  - models/           (modelos serializados: LightGBM y LogReg)
+  - src/              (codigo fuente, este documento)
+  - deploy/           (specs DigitalOcean, AWS y GCP)
 
 Pipeline para reproducir desde cero:
   1. python -m src.eda

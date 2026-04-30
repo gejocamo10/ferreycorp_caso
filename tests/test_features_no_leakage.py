@@ -1,7 +1,7 @@
-"""Tests críticos: validar que las features no tienen data leakage.
+"""Pruebas criticas para validar que las features no tienen data leakage.
 
-Si estos tests fallan, el modelo está aprendiendo del futuro y todas las métricas
-de evaluación están infladas. Es el bug más peligroso en proyectos de ML.
+Si fallan, el modelo esta aprendiendo del futuro y todas las metricas
+de evaluacion estan infladas, lo que invalida cualquier conclusion del proyecto.
 
 Run:
     pytest tests/ -v

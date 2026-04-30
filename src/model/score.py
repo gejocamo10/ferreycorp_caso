@@ -1,10 +1,15 @@
-"""Batch scoring pipeline.
+"""Pipeline de scoring batch.
 
-Loads features → predicts probability of purchase per (cliente, dia_visita)
-→ enriches with customer demographics + segment → writes Parquet via the
-cloud-agnostic storage layer (local / DO Spaces / AWS S3 / GCS).
+Carga las features ya construidas, predice la probabilidad de compra para
+cada par (cliente, dia de visita) con el LightGBM entrenado, enriquece la
+salida con demografia y segmento, y escribe el resultado como Parquet usando
+la capa de storage agnostica (local, DO Spaces, AWS S3 o GCS).
 
-Run:
+El Parquet resultante es lo que el agente conversacional consulta en linea.
+Cuando llegan datos nuevos, basta volver a correr este script para refrescar
+las predicciones.
+
+Para ejecutar:
     python -m src.model.score
 """
 from __future__ import annotations
@@ -21,7 +26,7 @@ PROCESSED = PROJECT_ROOT / "data" / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
 OUTPUT_DIR = ensure_dir(PROJECT_ROOT / "data" / "predictions")
 
-# Columns we keep alongside predictions for the agent to filter on
+# Columnas que conservamos junto a las predicciones para que el agente pueda filtrar por ellas
 ENRICHMENT_COLS = [
     "id", "dia_visita",
     "edad", "ingreso_anual", "genero", "estado_civil", "nivel_educacion", "ocupacion",
@@ -31,20 +36,20 @@ ENRICHMENT_COLS = [
 
 
 def main() -> None:
-    print("Loading model + features...")
+    print("Cargando modelo y features...")
     booster = lgb.Booster(model_file=str(MODELS_DIR / "lgbm_propensity.txt"))
     features = pd.read_parquet(PROCESSED / "features.parquet")
     segments = pd.read_parquet(PROCESSED / "customer_segments.parquet")
-    print(f"  rows={len(features):,}  customers={features['id'].nunique()}")
+    print(f"  filas={len(features):,}  clientes={features['id'].nunique()}")
 
     X = features[FEATURE_COLUMNS].copy()
     for c in CATEGORICAL_FEATURES:
         X[c] = X[c].astype("category")
 
-    print("Scoring all rows...")
+    print("Scoring de todas las filas...")
     proba = booster.predict(X)
 
-    print("Building predictions table...")
+    print("Construyendo tabla de predicciones...")
     preds = features[ENRICHMENT_COLS].copy()
     preds["score_compra"] = proba
     preds = preds.merge(segments[["id", "cluster_id", "cluster_label"]], on="id", how="left")
@@ -57,32 +62,32 @@ def main() -> None:
         labels=["bajo", "medio_bajo", "medio_alto", "alto"],
     ).astype(str)
 
-    print("\nPredictions summary by decile:")
+    print("\nResumen de predicciones por decil:")
     print(preds.groupby("decile", observed=True).agg(
         n=("id", "count"),
         avg_score=("score_compra", "mean"),
         actual_rate=("incidencia_compra", "mean"),
     ).round(3))
 
-    print("\nPredictions summary by segment:")
+    print("\nResumen de predicciones por segmento:")
     print(preds.groupby("cluster_label").agg(
         n=("id", "count"),
         avg_score=("score_compra", "mean"),
         actual_rate=("incidencia_compra", "mean"),
     ).round(3))
 
-    print("\nSaving predictions...")
+    print("\nGuardando predicciones...")
     local_path = OUTPUT_DIR / "predictions.parquet"
     preds.to_parquet(local_path, index=False)
     print(f"  local: {local_path}")
 
     if storage.provider != "local":
         uri = storage.write_parquet(preds, "predictions.parquet")
-        print(f"  cloud ({storage.provider}): {uri}")
+        print(f"  nube ({storage.provider}): {uri}")
     else:
-        print(f"  cloud upload skipped (CLOUD_PROVIDER=local)")
+        print("  upload a la nube omitido (CLOUD_PROVIDER=local)")
 
-    print(f"\nDone. {len(preds):,} predictions written.")
+    print(f"\nListo. {len(preds):,} predicciones escritas.")
 
 
 if __name__ == "__main__":

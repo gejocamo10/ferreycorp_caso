@@ -1,13 +1,19 @@
-"""Cloud-agnostic object storage layer.
+"""Capa de almacenamiento agnostica del proveedor cloud.
 
-Supports:
-  - local      : write/read on local filesystem (dev mode)
-  - digitalocean : DO Spaces (S3-compatible API)
-  - aws        : AWS S3
-  - gcp        : Google Cloud Storage
+Esta clase resuelve un problema concreto: si el codigo se escribe asumiendo un
+proveedor especifico (digamos AWS S3), migrar a otra nube luego implica reescribir
+mucho. Aqui abstraigo las diferencias detras de cuatro metodos publicos
+(`write_parquet`, `read_parquet`, `get_duckdb_uri`, `configure_duckdb`) y el resto
+del codigo no necesita saber en que nube esta corriendo.
 
-Switching providers requires only changing env vars — no code change.
-The same Parquet file produced here is queryable by DuckDB across all providers.
+Proveedores soportados:
+  - local        : sistema de archivos local (modo desarrollo)
+  - digitalocean : DO Spaces (API compatible con S3)
+  - aws          : AWS S3
+  - gcp          : Google Cloud Storage
+
+El mismo archivo Parquet escrito aqui es consultable por DuckDB en cualquier
+proveedor sin cambios en el codigo del agente.
 """
 from __future__ import annotations
 
@@ -24,23 +30,25 @@ Provider = Literal["local", "digitalocean", "aws", "gcp"]
 
 
 class ObjectStorage:
-    """Unified read/write interface for Parquet files across cloud providers.
+    """Interfaz unica para leer y escribir Parquet en distintos proveedores.
 
-    URI conventions:
-      local       → relative or absolute path (./data/predictions/foo.parquet)
-      digitalocean→ s3://<bucket>/<key>          (uses DO endpoint)
-      aws         → s3://<bucket>/<key>
-      gcp         → gs://<bucket>/<key>
+    Convencion de URIs:
+      local        : path relativo o absoluto (./data/predictions/foo.parquet)
+      digitalocean : s3://<bucket>/<key>  (usa el endpoint de DO)
+      aws          : s3://<bucket>/<key>
+      gcp          : gs://<bucket>/<key>
     """
 
     def __init__(self, provider: Provider | None = None):
         self.provider: Provider = provider or config.cloud_provider  # type: ignore
 
     # ------------------------------------------------------------
-    # Public API
+    # API publica
     # ------------------------------------------------------------
     def write_parquet(self, df: pd.DataFrame, key: str) -> str:
-        """Write DataFrame as Parquet to the configured backend. Returns final URI."""
+        """Escribe el DataFrame como Parquet en el backend configurado y
+        devuelve la URI final donde quedo el archivo.
+        """
         uri = self._uri(key)
         if self.provider == "local":
             Path(uri).parent.mkdir(parents=True, exist_ok=True)
@@ -51,17 +59,20 @@ class ObjectStorage:
         return uri
 
     def read_parquet(self, key: str) -> pd.DataFrame:
+        """Lee un Parquet desde el backend configurado."""
         uri = self._uri(key)
         if self.provider == "local":
             return pd.read_parquet(uri)
         return pd.read_parquet(uri, storage_options=self._fsspec_options())
 
     def get_duckdb_uri(self, key: str) -> str:
-        """Returns a URI that DuckDB can query via httpfs / fsspec."""
+        """Devuelve una URI que DuckDB puede consultar via httpfs o fsspec."""
         return self._uri(key)
 
     def configure_duckdb(self, conn) -> None:
-        """Inject S3/GCS credentials into a DuckDB connection so it can read remote Parquet."""
+        """Inyecta credenciales de S3 o GCS en una conexion de DuckDB para que
+        pueda leer Parquet remotos sin descargarlos primero.
+        """
         if self.provider in ("digitalocean", "aws"):
             conn.execute("INSTALL httpfs; LOAD httpfs;")
             if config.storage_endpoint:
@@ -76,14 +87,14 @@ class ObjectStorage:
                 conn.execute(f"SET s3_secret_access_key='{config.storage_secret}';")
         elif self.provider == "gcp":
             conn.execute("INSTALL httpfs; LOAD httpfs;")
-            # GCS via HMAC keys — equivalent to S3 protocol
+            # GCS vía HMAC keys, equivalente al protocolo S3.
             if config.storage_key and config.storage_secret:
                 conn.execute("SET s3_endpoint='storage.googleapis.com';")
                 conn.execute(f"SET s3_access_key_id='{config.storage_key}';")
                 conn.execute(f"SET s3_secret_access_key='{config.storage_secret}';")
 
     # ------------------------------------------------------------
-    # Internals
+    # Internos
     # ------------------------------------------------------------
     def _uri(self, key: str) -> str:
         if self.provider == "local":
@@ -93,7 +104,7 @@ class ObjectStorage:
             return f"s3://{config.storage_bucket}/{key}"
         elif self.provider == "gcp":
             return f"gs://{config.storage_bucket}/{key}"
-        raise ValueError(f"Unknown provider: {self.provider}")
+        raise ValueError(f"Proveedor no soportado: {self.provider}")
 
     def _fsspec_options(self) -> dict:
         if self.provider == "digitalocean":
@@ -105,7 +116,8 @@ class ObjectStorage:
         elif self.provider == "aws":
             return {"key": config.storage_key, "secret": config.storage_secret}
         elif self.provider == "gcp":
-            return {}  # gcsfs picks up GOOGLE_APPLICATION_CREDENTIALS automatically
+            # gcsfs toma GOOGLE_APPLICATION_CREDENTIALS automaticamente.
+            return {}
         return {}
 
 

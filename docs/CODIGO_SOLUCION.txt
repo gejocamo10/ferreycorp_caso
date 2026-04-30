@@ -1,5 +1,5 @@
 ================================================================================
- CASO FERREYCORP — MODELO DE PROPENSIÓN DE COMPRA + AGENTE IA
+ CASO FERREYCORP, MODELO DE PROPENSIÓN DE COMPRA + AGENTE IA
  Código de la solución (consolidado)
 ================================================================================
 
@@ -7,13 +7,13 @@ Este documento contiene todo el código fuente de la solución, organizado
 por componentes para facilitar la lectura.
 
 Estructura del repositorio:
-  - data/raw/         → CSV original
-  - data/processed/   → Features y segmentos (Parquet)
-  - data/predictions/ → Predicciones del modelo (consumidas por el agente)
-  - docs/             → EDA, documento técnico, slides
-  - models/           → Modelos serializados (LightGBM, LogReg)
-  - src/              → Código fuente (este documento)
-  - deploy/           → Specs DigitalOcean / AWS / GCP
+  - data/raw/         (CSV original)
+  - data/processed/   (features y segmentos en Parquet)
+  - data/predictions/ (predicciones del modelo, consumidas por el agente)
+  - docs/             (EDA, documento tecnico, slides)
+  - models/           (modelos serializados: LightGBM y LogReg)
+  - src/              (codigo fuente, este documento)
+  - deploy/           (specs DigitalOcean, AWS y GCP)
 
 Pipeline para reproducir desde cero:
   1. python -m src.eda
@@ -64,29 +64,29 @@ ipykernel==6.29.4
 # Archivo: .env.example
 --------------------------------------------------------------------------------
 # ============================================================
-# Cloud provider — switch among: digitalocean | aws | gcp | local
+# Proveedor cloud, valores posibles: digitalocean, aws, gcp, local
 # ============================================================
 CLOUD_PROVIDER=local
 
 # ============================================================
-# Object storage (S3-compatible for DO/AWS, GCS for GCP)
+# Object storage (compatible con S3 para DO y AWS, GCS para GCP)
 # ============================================================
 STORAGE_BUCKET=ferreycorp-predictions
 STORAGE_ENDPOINT=
-# Si usas DigitalOcean Spaces, descomenta y usa:
+# Si se usa DigitalOcean Spaces, descomentar y ajustar a la region elegida:
 # STORAGE_ENDPOINT=https://nyc3.digitaloceanspaces.com
 STORAGE_REGION=us-east-1
 STORAGE_KEY=
 STORAGE_SECRET=
 
 # ============================================================
-# Local paths (used when CLOUD_PROVIDER=local)
+# Paths locales (se usan cuando CLOUD_PROVIDER=local)
 # ============================================================
 LOCAL_DATA_DIR=./data
 LOCAL_PREDICTIONS_PATH=./data/predictions/predictions.parquet
 
 # ============================================================
-# Database (Postgres — same connection string format on all clouds)
+# Base de datos (Postgres, mismo formato de conexion en todas las nubes)
 # ============================================================
 DATABASE_URL=postgresql://user:pass@localhost:5432/ferreycorp
 
@@ -96,10 +96,10 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/ferreycorp
 REDIS_URL=redis://localhost:6379/0
 
 # ============================================================
-# LLM — Anthropic (Claude)
+# LLM (Anthropic, Claude)
 # ============================================================
 ANTHROPIC_API_KEY=
-ANTHROPIC_MODEL=claude-sonnet-4-5
+ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
 
 # ============================================================
 # App
@@ -110,10 +110,9 @@ LOG_LEVEL=INFO
 --------------------------------------------------------------------------------
 # Archivo: docker/Dockerfile
 --------------------------------------------------------------------------------
-# ============================================================
-# Cloud-agnostic container — runs on DO App Platform,
-# AWS ECS / App Runner, GCP Cloud Run, or any K8s cluster.
-# ============================================================
+# Imagen del contenedor agnostica del proveedor cloud.
+# Corre en DigitalOcean App Platform, AWS ECS o App Runner, GCP Cloud Run
+# o cualquier cluster de Kubernetes sin cambios.
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -122,6 +121,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# build-essential y libgomp1 son necesarios para compilar e invocar LightGBM.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgomp1 \
@@ -135,16 +135,20 @@ COPY models/ ./models/
 
 EXPOSE 8501
 
-# Streamlit entrypoint by default; override CMD for batch jobs
+# Por defecto arranca la UI de Streamlit. Para correr trabajos batch
+# (entrenar, scorear, etc.) se sobrescribe el CMD al lanzar el contenedor.
 CMD ["streamlit", "run", "src/app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
 
 --------------------------------------------------------------------------------
 # Archivo: src/config.py
 --------------------------------------------------------------------------------
-"""Centralized configuration loaded from environment variables.
+"""Configuracion centralizada del proyecto, leida desde variables de entorno.
 
-Switching cloud providers (DigitalOcean, AWS, GCP) only requires changing
-env vars, never application code.
+Toda la configuracion vive aqui (proveedor cloud, credenciales, paths,
+modelo de Claude). El resto del codigo solo importa la instancia `config`.
+
+Cambiar de DigitalOcean a AWS o GCP no requiere tocar codigo, solo se
+ajustan variables en el archivo .env.
 """
 from __future__ import annotations
 
@@ -156,10 +160,10 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Carga explicita del .env desde la raiz del proyecto para que funcione sin
-# importar el cwd (Streamlit, scripts, tests, contenedores).
-# override=True para que el .env del proyecto gane sobre variables vacias
-# heredadas del shell.
+# Cargo el .env con path absoluto para que funcione sin importar desde donde
+# se invoque el codigo (Streamlit, scripts, tests o contenedores).
+# Uso override=True para que las variables del .env del proyecto tengan
+# prioridad sobre variables vacias heredadas del shell del usuario.
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
@@ -198,7 +202,11 @@ config = Config()
 --------------------------------------------------------------------------------
 # Archivo: src/utils/io.py
 --------------------------------------------------------------------------------
-"""Data I/O helpers — single entrypoint for loading the raw dataset."""
+"""Utilidades de entrada y salida de datos.
+
+Concentro aqui la carga del CSV crudo para que todo el resto del codigo
+(EDA, features, scoring) use la misma fuente y el mismo orden.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -209,11 +217,14 @@ from src.config import PROJECT_ROOT
 
 RAW_CSV = PROJECT_ROOT / "data" / "raw" / "compras_data.csv"
 
+# Las 5 marcas que aparecen en el dataset, en el orden del diccionario de datos.
 BRANDS = [1, 2, 3, 4, 5]
 
 
 def load_raw() -> pd.DataFrame:
-    """Load raw transactional data, sorted by customer and visit day."""
+    """Carga el CSV crudo, lo ordena por cliente y dia de visita y descarta
+    la columna `tamanio_ciudad` que el diccionario indica no considerar.
+    """
     df = pd.read_csv(RAW_CSV)
     df = df.sort_values(["id", "dia_visita"]).reset_index(drop=True)
     if "tamanio_ciudad" in df.columns:
@@ -222,6 +233,7 @@ def load_raw() -> pd.DataFrame:
 
 
 def ensure_dir(path: str | Path) -> Path:
+    """Crea el directorio si no existe y devuelve el Path."""
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -229,9 +241,14 @@ def ensure_dir(path: str | Path) -> Path:
 --------------------------------------------------------------------------------
 # Archivo: src/eda.py
 --------------------------------------------------------------------------------
-"""Exploratory Data Analysis: generates figures and a markdown report.
+"""Analisis exploratorio de datos.
 
-Run from project root:
+Genera 11 figuras y un reporte en markdown que documentan el dataset crudo
+(distribuciones, balance del target, lealtad por marca, sensibilidad a promo,
+correlaciones, etc.). El reporte sirve como insumo para tomar decisiones de
+modelado: que features construir, que tipo de modelo elegir y como evaluar.
+
+Para ejecutar desde la raiz del proyecto:
     python -m src.eda
 """
 from __future__ import annotations
@@ -423,7 +440,8 @@ def fig_loyalty(df: pd.DataFrame) -> None:
     fig.savefig(FIG_DIR / "11_loyalty.png", dpi=120)
     plt.close(fig)
 
-    # Concentration: how many customers buy >50% from a single brand?
+    # Concentracion: que fraccion de clientes concentran mas del 50% de
+    # sus compras en una sola marca (mide lealtad de marca a nivel poblacional).
     top_share = loyalty_pct.max(axis=1)
     concentrated = (top_share > 0.5).mean()
     return concentrated
@@ -584,12 +602,14 @@ if __name__ == "__main__":
 --------------------------------------------------------------------------------
 # Archivo: src/features.py
 --------------------------------------------------------------------------------
-"""Feature engineering — strictly causal features per (customer, visit_day).
+"""Construccion de features estrictamente causales por (cliente, dia de visita).
 
-All historical aggregates use only data with `dia < dia_visita_actual` (no leakage).
-Computed efficiently with groupby cumulative ops + shift, no Python loops.
+Toda agregacion historica se calcula usando unicamente datos con
+`dia < dia_visita_actual` del mismo cliente, para evitar data leakage. La
+computacion se hace con operaciones acumulativas de groupby y shift, sin
+loops de Python, lo que mantiene el tiempo bajo aun con 58 mil filas.
 
-Run:
+Para ejecutar:
     python -m src.features
 """
 from __future__ import annotations
@@ -606,10 +626,12 @@ PROCESSED_DIR = ensure_dir(PROJECT_ROOT / "data" / "processed")
 
 
 # ============================================================
-# Customer-level causal aggregates (RFM, loyalty, promo sens.)
+# Agregados causales a nivel cliente (RFM, lealtad, sensibilidad a promo)
 # ============================================================
 def add_prior_visit_aggregates(df: pd.DataFrame) -> pd.DataFrame:
-    """For each row, add aggregates computed over PRIOR visits of same customer."""
+    """Para cada fila, agrega features calculadas sobre las visitas previas
+    del mismo cliente (recencia, frecuencia, ticket promedio).
+    """
     df = df.sort_values(["id", "dia_visita"]).reset_index(drop=True).copy()
     grp = df.groupby("id", sort=False)
 
@@ -639,7 +661,10 @@ def add_prior_visit_aggregates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_brand_loyalty(df: pd.DataFrame) -> pd.DataFrame:
-    """Per (customer, brand): prior fraction of customer's purchases that went to brand b."""
+    """Para cada par (cliente, marca), calcula la fraccion historica de
+    compras de ese cliente que fueron de la marca b. Devuelve 5 columnas
+    `loyalty_b1` a `loyalty_b5` que suman 1 cuando hay historia previa.
+    """
     grp = df.groupby("id", sort=False)
     for b in BRANDS:
         bought_b = ((df["id_marca"] == b) & (df["incidencia_compra"] == 1)).astype(int)
@@ -650,7 +675,9 @@ def add_brand_loyalty(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_promo_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
-    """How much does this customer respond to promotions historically?"""
+    """Mide cuanto responde el cliente a promociones historicamente,
+    comparando su tasa de compra cuando hay promo activa contra cuando no.
+    """
     promo_cols = [f"promo_marca_{b}" for b in BRANDS]
     df["any_promo_today"] = (df[promo_cols].sum(axis=1) > 0).astype(int)
 
@@ -674,9 +701,11 @@ def add_promo_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_relative_prices(df: pd.DataFrame) -> pd.DataFrame:
-    """Today's price for each brand vs. historical average (causal).
+    """Calcula el precio actual de cada marca dividido entre el promedio
+    historico de esa marca, de forma causal (sin incluir el dia actual).
 
-    Same prices apply to all customers on a given day, so we compute at day level.
+    Como los precios son los mismos para todos los clientes en un dia dado,
+    el calculo se hace a nivel dia y luego se hace merge con las visitas.
     """
     price_cols = [f"precio_marca_{b}" for b in BRANDS]
     daily_prices = df.groupby("dia_visita")[price_cols].first().sort_index()
@@ -698,8 +727,9 @@ def add_relative_prices(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_loyal_brand_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Per row: which brand is the customer most loyal to historically? Is it on promo today?
-    Is its price below historical average?
+    """Calcula features que combinan la marca leal del cliente con el estado
+    actual del dia: si esa marca esta en promo hoy, y si su precio actual
+    esta por debajo o encima de su promedio historico.
     """
     loyalty_cols = [f"loyalty_b{b}" for b in BRANDS]
     df["loyal_brand_id"] = df[loyalty_cols].values.argmax(axis=1) + 1
@@ -718,11 +748,15 @@ def add_loyal_brand_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# Customer-level segmentation (for the AGENT to filter on)
-# Computed at end of period — used for filtering, NOT model input.
+# Segmentacion a nivel cliente para que el agente pueda filtrar por nombre
+# (Leales premium, Cazadores de oferta, etc.). Se computa sobre todo el
+# periodo y NO se usa como feature del modelo, para evitar leakage.
 # ============================================================
 def compute_customer_segments(df: pd.DataFrame, n_clusters: int = 4, seed: int = 42) -> pd.DataFrame:
-    """K-Means on customer-level RFM + demographics. Returns DataFrame with id + cluster + label."""
+    """Aplica K-Means sobre features agregadas a nivel cliente
+    (tasa de compra, total de compras, ticket promedio, edad, ingreso) y
+    devuelve un DataFrame con id, id de cluster y etiqueta legible.
+    """
     cust = (
         df.groupby("id")
         .agg(
@@ -757,7 +791,10 @@ def compute_customer_segments(df: pd.DataFrame, n_clusters: int = 4, seed: int =
 
 
 def label_clusters(stats: pd.DataFrame) -> dict[int, str]:
-    """Heuristic labels based on buy_rate + income."""
+    """Asigna etiquetas legibles a los clusters segun su tasa de compra
+    y nivel de ingreso, para que el agente pueda referirse a ellos por
+    nombre (Leales premium, Cazadores de oferta, etc.).
+    """
     labels = {}
     sorted_by_rate = stats.sort_values("avg_buy_rate", ascending=False).index.tolist()
     sorted_by_income = stats.sort_values("avg_income", ascending=False).index.tolist()
@@ -866,12 +903,21 @@ if __name__ == "__main__":
 --------------------------------------------------------------------------------
 # Archivo: src/model/train.py
 --------------------------------------------------------------------------------
-"""Train propensity models — Logistic Regression baseline + LightGBM tuned with Optuna.
+"""Entrenamiento de los modelos de propension de compra.
 
-Temporal split (no random shuffling): train < day 510, val 510-619, test 620-730.
-Target: incidencia_compra.
+Entrena dos modelos: una Regresion Logistica como baseline y un LightGBM
+tuneado con Optuna como modelo principal. Usa split temporal (no aleatorio)
+para evitar que el modelo vea dias futuros del mismo cliente, lo que seria
+data leakage.
 
-Run:
+Particion temporal:
+  train      : dias 1 a 509   (alrededor del 70 por ciento)
+  validacion : dias 510 a 619 (alrededor del 15 por ciento)
+  test       : dias 620 a 730 (alrededor del 15 por ciento)
+
+Target: incidencia_compra (0 o 1).
+
+Para ejecutar:
     python -m src.model.train
 """
 from __future__ import annotations
@@ -920,7 +966,10 @@ def temporal_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
 
 
 def lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k: float = 0.10) -> float:
-    """Lift @ top-K: among the top-K% scored, what's the purchase rate vs. baseline."""
+    """Lift @ top-K: cuantas veces mayor es la tasa de compra entre el top
+    K por ciento de clientes scoreados versus la tasa base de la poblacion.
+    Es la metrica clave para decidir a quien llamar en una campaña.
+    """
     n = len(y_true)
     cutoff = int(np.ceil(n * k))
     order = np.argsort(-y_score)
@@ -988,7 +1037,9 @@ def tune_lgbm(X_train, y_train, X_val, y_val, cat_idx: list[int], n_trials: int 
 
 
 def train_lgbm_final(X_trval, y_trval, X_val, y_val, cat_idx, best_params) -> lgb.Booster:
-    """Refit on train+val combined for final model (use val for early-stop signal still)."""
+    """Reentrena LightGBM usando los mejores hiperparametros encontrados
+    por Optuna y deja a la validacion como senal para early stopping.
+    """
     params = {"objective": "binary", "metric": "auc", "verbosity": -1, **best_params}
     train_set = lgb.Dataset(X_trval, label=y_trval, categorical_feature=cat_idx)
     val_set = lgb.Dataset(X_val, label=y_val, categorical_feature=cat_idx, reference=train_set)
@@ -1003,13 +1054,13 @@ def train_lgbm_final(X_trval, y_trval, X_val, y_val, cat_idx, best_params) -> lg
 
 
 def main() -> None:
-    print("Loading features...")
+    print("Cargando features...")
     df = pd.read_parquet(PROCESSED / "features.parquet")
     print(f"  shape={df.shape}")
 
     train, val, test = temporal_split(df)
     print(f"  train: {len(train):,}  val: {len(val):,}  test: {len(test):,}")
-    print(f"  train base rate: {train[TARGET].mean():.3f}  val: {val[TARGET].mean():.3f}  test: {test[TARGET].mean():.3f}")
+    print(f"  base rate: train={train[TARGET].mean():.3f}  val={val[TARGET].mean():.3f}  test={test[TARGET].mean():.3f}")
 
     X_train, y_train = train[FEATURE_COLUMNS], train[TARGET]
     X_val, y_val = val[FEATURE_COLUMNS], val[TARGET]
@@ -1022,9 +1073,9 @@ def main() -> None:
     cat_idx = [FEATURE_COLUMNS.index(c) for c in CATEGORICAL_FEATURES]
 
     # ============================================================
-    # Baseline: Logistic Regression
+    # Baseline con Regresion Logistica
     # ============================================================
-    print("\n[1/3] Training Logistic Regression baseline...")
+    print("\n[1/3] Entrenando baseline (Regresion Logistica)...")
     X_train_lr = X_train.copy()
     X_val_lr = X_val.copy()
     X_test_lr = X_test.copy()
@@ -1037,11 +1088,11 @@ def main() -> None:
     print(f"  LR val AUC={lr_val['auc_roc']:.4f}  test AUC={lr_test['auc_roc']:.4f}  lift@10={lr_test['lift@10%']:.2f}")
 
     # ============================================================
-    # LightGBM with Optuna tuning
+    # LightGBM tuneado con Optuna
     # ============================================================
-    print("\n[2/3] Tuning LightGBM with Optuna (30 trials)...")
+    print("\n[2/3] Tuneando LightGBM con Optuna (30 trials)...")
     best_params = tune_lgbm(X_train, y_train, X_val, y_val, cat_idx, n_trials=30)
-    print(f"  best params: {best_params}")
+    print(f"  Mejores hiperparametros: {best_params}")
 
     booster = train_lgbm_final(X_train, y_train, X_val, y_val, cat_idx, best_params)
     val_proba = booster.predict(X_val, num_iteration=booster.best_iteration)
@@ -1051,9 +1102,9 @@ def main() -> None:
     print(f"  LightGBM val AUC={lgb_val['auc_roc']:.4f}  test AUC={lgb_test['auc_roc']:.4f}  lift@10={lgb_test['lift@10%']:.2f}")
 
     # ============================================================
-    # Save
+    # Guardar modelos y metricas
     # ============================================================
-    print("\n[3/3] Saving models and metrics...")
+    print("\n[3/3] Guardando modelos y metricas...")
     booster.save_model(str(MODELS_DIR / "lgbm_propensity.txt"))
     joblib.dump(lr_model, MODELS_DIR / "logreg_propensity.joblib")
     joblib.dump({"feature_columns": FEATURE_COLUMNS, "categorical": CATEGORICAL_FEATURES}, MODELS_DIR / "feature_schema.joblib")
@@ -1066,8 +1117,8 @@ def main() -> None:
     }
     (METRICS_DIR / "model_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
-    print("\n=== FINAL TEST METRICS ===")
-    print(f"{'Metric':<15} {'LogReg':>10} {'LightGBM':>10}")
+    print("\n=== Metricas finales en test ===")
+    print(f"{'Metrica':<15} {'LogReg':>10} {'LightGBM':>10}")
     for k in ["auc_roc", "pr_auc", "log_loss", "brier", "lift@10%", "lift@20%", "lift@30%"]:
         print(f"{k:<15} {lr_test[k]:>10.4f} {lgb_test[k]:>10.4f}")
 
@@ -1078,16 +1129,16 @@ if __name__ == "__main__":
 --------------------------------------------------------------------------------
 # Archivo: src/model/explain.py
 --------------------------------------------------------------------------------
-"""Explainability + business charts for the trained LightGBM model.
+"""Explicabilidad y graficos de negocio sobre el modelo LightGBM entrenado.
 
-Generates:
-  - SHAP global importance (bar) and beeswarm
-  - Lift curve (cumulative gain)
-  - Calibration plot
-  - Confusion matrix at chosen threshold
-  - Top-K targeting table (CSV)
+Genera:
+  - Importancia global de features con SHAP (bar plot y beeswarm)
+  - Curva de ganancia acumulada (lift curve)
+  - Grafico de calibracion (probabilidad predicha vs. tasa real)
+  - Matriz de confusion a un umbral elegido
+  - Tabla de deciles para targeting (CSV)
 
-Run:
+Para ejecutar:
     python -m src.model.explain
 """
 from __future__ import annotations
@@ -1151,7 +1202,7 @@ def fig_lift_curve(y_true: np.ndarray, y_proba: np.ndarray) -> pd.DataFrame:
         idx = int(np.ceil(len(df) * k / 100)) - 1
         captured = df.loc[idx, "pct_positives_captured"]
         ax.scatter([k], [captured], color="#e76f51", zorder=5)
-        ax.annotate(f"  Top {k}% → {captured:.0f}% compras", (k, captured), fontsize=9)
+        ax.annotate(f"  Top {k}% captura {captured:.0f}% de compras", (k, captured), fontsize=9)
     ax.legend(loc="lower right")
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -1206,7 +1257,7 @@ def fig_confusion(y_true: np.ndarray, y_proba: np.ndarray, threshold: float = 0.
 
 
 def main() -> None:
-    print("Loading model + data...")
+    print("Cargando modelo y datos...")
     booster = lgb.Booster(model_file=str(MODELS_DIR / "lgbm_propensity.txt"))
     df = pd.read_parquet(PROCESSED / "features.parquet")
     _, _, test = temporal_split(df)
@@ -1216,19 +1267,19 @@ def main() -> None:
 
     proba = booster.predict(X_test)
 
-    print("Generating SHAP plots (sample of 3000)...")
+    print("Generando graficos SHAP (muestra de 3000 filas)...")
     sample = X_test.sample(min(3000, len(X_test)), random_state=42)
     fig_shap(booster, sample)
 
-    print("Generating lift curve...")
+    print("Generando curva de ganancia (lift)...")
     decile_table = fig_lift_curve(y_test, proba)
     decile_table.to_csv(PROJECT_ROOT / "docs" / "model" / "deciles.csv")
     print(decile_table.round(3))
 
-    print("Generating calibration plot...")
+    print("Generando grafico de calibracion...")
     fig_calibration(y_test, proba)
 
-    print("Generating confusion matrix...")
+    print("Generando matriz de confusion...")
     cm_metrics = fig_confusion(y_test, proba, threshold=0.5)
     print(f"  precision={cm_metrics['precision']:.3f}  recall={cm_metrics['recall']:.3f}")
 
@@ -1242,7 +1293,7 @@ def main() -> None:
     (PROJECT_ROOT / "docs" / "model" / "explainability_summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
-    print("\nDone. Figures at docs/model/figures/")
+    print("\nListo. Figuras generadas en docs/model/figures/")
 
 
 if __name__ == "__main__":
@@ -1251,13 +1302,18 @@ if __name__ == "__main__":
 --------------------------------------------------------------------------------
 # Archivo: src/model/score.py
 --------------------------------------------------------------------------------
-"""Batch scoring pipeline.
+"""Pipeline de scoring batch.
 
-Loads features → predicts probability of purchase per (cliente, dia_visita)
-→ enriches with customer demographics + segment → writes Parquet via the
-cloud-agnostic storage layer (local / DO Spaces / AWS S3 / GCS).
+Carga las features ya construidas, predice la probabilidad de compra para
+cada par (cliente, dia de visita) con el LightGBM entrenado, enriquece la
+salida con demografia y segmento, y escribe el resultado como Parquet usando
+la capa de storage agnostica (local, DO Spaces, AWS S3 o GCS).
 
-Run:
+El Parquet resultante es lo que el agente conversacional consulta en linea.
+Cuando llegan datos nuevos, basta volver a correr este script para refrescar
+las predicciones.
+
+Para ejecutar:
     python -m src.model.score
 """
 from __future__ import annotations
@@ -1274,7 +1330,7 @@ PROCESSED = PROJECT_ROOT / "data" / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
 OUTPUT_DIR = ensure_dir(PROJECT_ROOT / "data" / "predictions")
 
-# Columns we keep alongside predictions for the agent to filter on
+# Columnas que conservamos junto a las predicciones para que el agente pueda filtrar por ellas
 ENRICHMENT_COLS = [
     "id", "dia_visita",
     "edad", "ingreso_anual", "genero", "estado_civil", "nivel_educacion", "ocupacion",
@@ -1284,20 +1340,20 @@ ENRICHMENT_COLS = [
 
 
 def main() -> None:
-    print("Loading model + features...")
+    print("Cargando modelo y features...")
     booster = lgb.Booster(model_file=str(MODELS_DIR / "lgbm_propensity.txt"))
     features = pd.read_parquet(PROCESSED / "features.parquet")
     segments = pd.read_parquet(PROCESSED / "customer_segments.parquet")
-    print(f"  rows={len(features):,}  customers={features['id'].nunique()}")
+    print(f"  filas={len(features):,}  clientes={features['id'].nunique()}")
 
     X = features[FEATURE_COLUMNS].copy()
     for c in CATEGORICAL_FEATURES:
         X[c] = X[c].astype("category")
 
-    print("Scoring all rows...")
+    print("Scoring de todas las filas...")
     proba = booster.predict(X)
 
-    print("Building predictions table...")
+    print("Construyendo tabla de predicciones...")
     preds = features[ENRICHMENT_COLS].copy()
     preds["score_compra"] = proba
     preds = preds.merge(segments[["id", "cluster_id", "cluster_label"]], on="id", how="left")
@@ -1310,32 +1366,32 @@ def main() -> None:
         labels=["bajo", "medio_bajo", "medio_alto", "alto"],
     ).astype(str)
 
-    print("\nPredictions summary by decile:")
+    print("\nResumen de predicciones por decil:")
     print(preds.groupby("decile", observed=True).agg(
         n=("id", "count"),
         avg_score=("score_compra", "mean"),
         actual_rate=("incidencia_compra", "mean"),
     ).round(3))
 
-    print("\nPredictions summary by segment:")
+    print("\nResumen de predicciones por segmento:")
     print(preds.groupby("cluster_label").agg(
         n=("id", "count"),
         avg_score=("score_compra", "mean"),
         actual_rate=("incidencia_compra", "mean"),
     ).round(3))
 
-    print("\nSaving predictions...")
+    print("\nGuardando predicciones...")
     local_path = OUTPUT_DIR / "predictions.parquet"
     preds.to_parquet(local_path, index=False)
     print(f"  local: {local_path}")
 
     if storage.provider != "local":
         uri = storage.write_parquet(preds, "predictions.parquet")
-        print(f"  cloud ({storage.provider}): {uri}")
+        print(f"  nube ({storage.provider}): {uri}")
     else:
-        print(f"  cloud upload skipped (CLOUD_PROVIDER=local)")
+        print("  upload a la nube omitido (CLOUD_PROVIDER=local)")
 
-    print(f"\nDone. {len(preds):,} predictions written.")
+    print(f"\nListo. {len(preds):,} predicciones escritas.")
 
 
 if __name__ == "__main__":
@@ -1349,16 +1405,22 @@ if __name__ == "__main__":
 --------------------------------------------------------------------------------
 # Archivo: src/storage/object_storage.py
 --------------------------------------------------------------------------------
-"""Cloud-agnostic object storage layer.
+"""Capa de almacenamiento agnostica del proveedor cloud.
 
-Supports:
-  - local      : write/read on local filesystem (dev mode)
-  - digitalocean : DO Spaces (S3-compatible API)
-  - aws        : AWS S3
-  - gcp        : Google Cloud Storage
+Esta clase resuelve un problema concreto: si el codigo se escribe asumiendo un
+proveedor especifico (digamos AWS S3), migrar a otra nube luego implica reescribir
+mucho. Aqui abstraigo las diferencias detras de cuatro metodos publicos
+(`write_parquet`, `read_parquet`, `get_duckdb_uri`, `configure_duckdb`) y el resto
+del codigo no necesita saber en que nube esta corriendo.
 
-Switching providers requires only changing env vars — no code change.
-The same Parquet file produced here is queryable by DuckDB across all providers.
+Proveedores soportados:
+  - local        : sistema de archivos local (modo desarrollo)
+  - digitalocean : DO Spaces (API compatible con S3)
+  - aws          : AWS S3
+  - gcp          : Google Cloud Storage
+
+El mismo archivo Parquet escrito aqui es consultable por DuckDB en cualquier
+proveedor sin cambios en el codigo del agente.
 """
 from __future__ import annotations
 
@@ -1375,23 +1437,25 @@ Provider = Literal["local", "digitalocean", "aws", "gcp"]
 
 
 class ObjectStorage:
-    """Unified read/write interface for Parquet files across cloud providers.
+    """Interfaz unica para leer y escribir Parquet en distintos proveedores.
 
-    URI conventions:
-      local       → relative or absolute path (./data/predictions/foo.parquet)
-      digitalocean→ s3://<bucket>/<key>          (uses DO endpoint)
-      aws         → s3://<bucket>/<key>
-      gcp         → gs://<bucket>/<key>
+    Convencion de URIs:
+      local        : path relativo o absoluto (./data/predictions/foo.parquet)
+      digitalocean : s3://<bucket>/<key>  (usa el endpoint de DO)
+      aws          : s3://<bucket>/<key>
+      gcp          : gs://<bucket>/<key>
     """
 
     def __init__(self, provider: Provider | None = None):
         self.provider: Provider = provider or config.cloud_provider  # type: ignore
 
     # ------------------------------------------------------------
-    # Public API
+    # API publica
     # ------------------------------------------------------------
     def write_parquet(self, df: pd.DataFrame, key: str) -> str:
-        """Write DataFrame as Parquet to the configured backend. Returns final URI."""
+        """Escribe el DataFrame como Parquet en el backend configurado y
+        devuelve la URI final donde quedo el archivo.
+        """
         uri = self._uri(key)
         if self.provider == "local":
             Path(uri).parent.mkdir(parents=True, exist_ok=True)
@@ -1402,17 +1466,20 @@ class ObjectStorage:
         return uri
 
     def read_parquet(self, key: str) -> pd.DataFrame:
+        """Lee un Parquet desde el backend configurado."""
         uri = self._uri(key)
         if self.provider == "local":
             return pd.read_parquet(uri)
         return pd.read_parquet(uri, storage_options=self._fsspec_options())
 
     def get_duckdb_uri(self, key: str) -> str:
-        """Returns a URI that DuckDB can query via httpfs / fsspec."""
+        """Devuelve una URI que DuckDB puede consultar via httpfs o fsspec."""
         return self._uri(key)
 
     def configure_duckdb(self, conn) -> None:
-        """Inject S3/GCS credentials into a DuckDB connection so it can read remote Parquet."""
+        """Inyecta credenciales de S3 o GCS en una conexion de DuckDB para que
+        pueda leer Parquet remotos sin descargarlos primero.
+        """
         if self.provider in ("digitalocean", "aws"):
             conn.execute("INSTALL httpfs; LOAD httpfs;")
             if config.storage_endpoint:
@@ -1427,14 +1494,14 @@ class ObjectStorage:
                 conn.execute(f"SET s3_secret_access_key='{config.storage_secret}';")
         elif self.provider == "gcp":
             conn.execute("INSTALL httpfs; LOAD httpfs;")
-            # GCS via HMAC keys — equivalent to S3 protocol
+            # GCS vía HMAC keys, equivalente al protocolo S3.
             if config.storage_key and config.storage_secret:
                 conn.execute("SET s3_endpoint='storage.googleapis.com';")
                 conn.execute(f"SET s3_access_key_id='{config.storage_key}';")
                 conn.execute(f"SET s3_secret_access_key='{config.storage_secret}';")
 
     # ------------------------------------------------------------
-    # Internals
+    # Internos
     # ------------------------------------------------------------
     def _uri(self, key: str) -> str:
         if self.provider == "local":
@@ -1444,7 +1511,7 @@ class ObjectStorage:
             return f"s3://{config.storage_bucket}/{key}"
         elif self.provider == "gcp":
             return f"gs://{config.storage_bucket}/{key}"
-        raise ValueError(f"Unknown provider: {self.provider}")
+        raise ValueError(f"Proveedor no soportado: {self.provider}")
 
     def _fsspec_options(self) -> dict:
         if self.provider == "digitalocean":
@@ -1456,7 +1523,8 @@ class ObjectStorage:
         elif self.provider == "aws":
             return {"key": config.storage_key, "secret": config.storage_secret}
         elif self.provider == "gcp":
-            return {}  # gcsfs picks up GOOGLE_APPLICATION_CREDENTIALS automatically
+            # gcsfs toma GOOGLE_APPLICATION_CREDENTIALS automaticamente.
+            return {}
         return {}
 
 
@@ -1470,14 +1538,14 @@ storage = ObjectStorage()
 --------------------------------------------------------------------------------
 # Archivo: src/agent/tools.py
 --------------------------------------------------------------------------------
-"""DuckDB-backed query tools the agent can call.
+"""Herramientas que el agente puede llamar, ejecutadas con DuckDB sobre el Parquet.
 
-Architecture decision: instead of text-to-SQL (risky, can produce invalid/dangerous
-SQL), the LLM emits a structured filter object that we translate to parameterized
-SQL. Safer, predictable, easier to test.
+Decision de diseño: en vez de exponer text-to-SQL (riesgoso, puede generar SQL
+invalido o peligroso), el LLM emite un objeto de filtros estructurado que el
+backend traduce a SQL parametrizado. Es mas seguro, predecible y facil de testear.
 
-The Parquet file is read by DuckDB on every query — at this volume (~60k rows)
-queries return in <100ms even from cloud object storage.
+DuckDB lee el Parquet en cada consulta. Para este volumen (alrededor de 60 mil filas)
+las consultas devuelven en menos de 100 ms incluso leyendo desde object storage en la nube.
 """
 from __future__ import annotations
 
@@ -1491,7 +1559,8 @@ import pandas as pd
 from src.config import PROJECT_ROOT, config
 from src.storage.object_storage import storage
 
-# Allowed columns and operators — strict whitelist prevents SQL injection
+# Whitelist estricta de columnas y operadores. Cualquier valor que no este
+# aqui se rechaza antes de tocar SQL, lo que previene inyeccion.
 ALLOWED_COLUMNS: dict[str, str] = {
     "id": "INTEGER",
     "dia_visita": "INTEGER",
@@ -1520,7 +1589,7 @@ ALLOWED_SORT_DIR = {"asc", "desc"}
 
 
 # ============================================================
-# Connection / data loading
+# Conexion y carga de datos
 # ============================================================
 def _predictions_uri() -> str:
     if config.cloud_provider == "local":
@@ -1535,7 +1604,7 @@ def get_conn() -> duckdb.DuckDBPyConnection:
 
 
 # ============================================================
-# Filter language → SQL
+# Traduccion del lenguaje de filtros estructurados a SQL parametrizado
 # ============================================================
 def _build_where(filters: list[dict[str, Any]]) -> tuple[str, list[Any]]:
     if not filters:
@@ -1547,18 +1616,18 @@ def _build_where(filters: list[dict[str, Any]]) -> tuple[str, list[Any]]:
         op = f.get("operator", "=").upper()
         val = f.get("value")
         if col not in ALLOWED_COLUMNS:
-            raise ValueError(f"Column not allowed: {col}")
+            raise ValueError(f"Columna no permitida: {col}")
         if op not in ALLOWED_OPERATORS:
-            raise ValueError(f"Operator not allowed: {op}")
+            raise ValueError(f"Operador no permitido: {op}")
         if op == "IN":
             if not isinstance(val, list) or not val:
-                raise ValueError("IN requires a non-empty list value")
+                raise ValueError("El operador IN requiere una lista no vacia como valor")
             placeholders = ",".join(["?"] * len(val))
             clauses.append(f"{col} IN ({placeholders})")
             params.extend(val)
         elif op == "BETWEEN":
             if not isinstance(val, list) or len(val) != 2:
-                raise ValueError("BETWEEN requires a [low, high] list")
+                raise ValueError("El operador BETWEEN requiere una lista [min, max]")
             clauses.append(f"{col} BETWEEN ? AND ?")
             params.extend(val)
         else:
@@ -1575,15 +1644,15 @@ def _build_order(order_by: list[dict[str, str]] | None) -> str:
         col = ob.get("column")
         direction = ob.get("direction", "desc").lower()
         if col not in ALLOWED_COLUMNS:
-            raise ValueError(f"Order column not allowed: {col}")
+            raise ValueError(f"Columna de ordenamiento no permitida: {col}")
         if direction not in ALLOWED_SORT_DIR:
-            raise ValueError(f"Order direction not allowed: {direction}")
+            raise ValueError(f"Direccion de ordenamiento no permitida: {direction}")
         parts.append(f"{col} {direction}")
     return " ORDER BY " + ", ".join(parts)
 
 
 # ============================================================
-# Public tool functions (called by the agent via tool use)
+# Funciones publicas que el agente puede invocar via tool use
 # ============================================================
 def query_predictions(
     filters: list[dict[str, Any]] | None = None,
@@ -1591,11 +1660,14 @@ def query_predictions(
     limit: int = 50,
     columns: list[str] | None = None,
 ) -> dict[str, Any]:
-    """List individual customer-day predictions matching the filters."""
+    """Lista filas individuales de predicciones (cliente y dia) que cumplen
+    los filtros indicados. Util para preguntas tipo "dame los 50 clientes
+    con mayor score que sean de Leales premium".
+    """
     cols = columns or list(ALLOWED_COLUMNS.keys())
     for c in cols:
         if c not in ALLOWED_COLUMNS:
-            raise ValueError(f"Column not allowed: {c}")
+            raise ValueError(f"Columna no permitida: {c}")
     where_sql, params = _build_where(filters or [])
     order_sql = _build_order(order_by)
     limit = max(1, min(int(limit), 500))
@@ -1618,7 +1690,10 @@ def aggregate_predictions(
     order_by: list[dict[str, str]] | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
-    """Group + aggregate the predictions table (e.g., avg score by cluster)."""
+    """Agrupa y agrega la tabla de predicciones para responder preguntas tipo
+    "score promedio por segmento" o "cuantos clientes hay en el decil top
+    con promo activa".
+    """
     if aggregations is None:
         aggregations = [{"function": "count", "column": "id", "alias": "n"},
                         {"function": "avg", "column": "score_compra", "alias": "avg_score"}]
@@ -1626,16 +1701,16 @@ def aggregate_predictions(
     if group_by:
         for g in group_by:
             if g not in ALLOWED_COLUMNS:
-                raise ValueError(f"Group column not allowed: {g}")
+                raise ValueError(f"Columna de agrupacion no permitida: {g}")
             select_parts.append(g)
     for agg in aggregations:
         fn = agg.get("function", "count").lower()
         col = agg.get("column", "id")
         alias = agg.get("alias", f"{fn}_{col}")
         if fn not in ALLOWED_AGG:
-            raise ValueError(f"Agg function not allowed: {fn}")
+            raise ValueError(f"Funcion de agregacion no permitida: {fn}")
         if col not in ALLOWED_COLUMNS:
-            raise ValueError(f"Agg column not allowed: {col}")
+            raise ValueError(f"Columna de agregacion no permitida: {col}")
         if fn == "count":
             select_parts.append(f"COUNT({col}) AS {alias}")
         else:
@@ -1654,7 +1729,9 @@ def aggregate_predictions(
 
 
 def schema_info() -> dict[str, Any]:
-    """Return the available columns + their meaning so the LLM picks valid ones."""
+    """Devuelve la lista de columnas disponibles con su descripcion. El agente
+    puede llamar esta funcion cuando duda de que columna usar para un filtro.
+    """
     descriptions = {
         "id": "ID del cliente (500 únicos).",
         "dia_visita": "Día de la visita (1-730, ~2 años de datos).",
@@ -1674,19 +1751,21 @@ def schema_info() -> dict[str, Any]:
         "prior_buy_rate": "Tasa de compra histórica del cliente (0-1).",
         "recency_days": "Días desde la última compra del cliente (-1 si nunca).",
         "any_promo_today": "1 si al menos una marca está en promo ese día, 0 si no.",
-        "incidencia_compra": "Variable real (0/1) — útil para validar el modelo, no para predecir.",
+        "incidencia_compra": "Variable real (0 o 1). Util para validar el modelo, no para predecir.",
     }
     return {"columns": descriptions}
 
 --------------------------------------------------------------------------------
 # Archivo: src/agent/agent.py
 --------------------------------------------------------------------------------
-"""Conversational agent — Claude (Anthropic) + tool use over the predictions table.
+"""Agente conversacional, Claude (Anthropic) con tool use sobre la tabla de predicciones.
 
-The LLM doesn't write SQL directly. It calls structured tools whose arguments are
-validated against a column whitelist before being translated to parameterized SQL.
+El LLM no escribe SQL libre. Llama a herramientas estructuradas cuyos argumentos
+se validan contra una whitelist de columnas y operadores antes de traducirse a
+SQL parametrizado en DuckDB. Eso elimina el riesgo de inyeccion y hace la
+solucion testeable y predecible.
 
-Public API:
+API publica:
     PropensityAgent().chat(user_message, history) -> {"reply": str, "trace": [...]}
 """
 from __future__ import annotations
@@ -1713,7 +1792,7 @@ Tu trabajo:
 4. Cuando sea relevante, sugerir KPIs o acciones (ej: campañas dirigidas al decil top, ofertas a cazadores de oferta).
 
 Reglas importantes:
-- NO inventes números — SIEMPRE consulta primero antes de afirmar.
+- NO inventes numeros, SIEMPRE consulta primero antes de afirmar.
 - Si el usuario pide un listado, usa query_predictions con un limit razonable (ej: 20-50).
 - Si el usuario pide totales o promedios por grupo, usa aggregate_predictions con group_by.
 - Si no estás seguro de qué columna usar, llama a schema_info primero.
@@ -1853,7 +1932,7 @@ class PropensityAgent:
 
     def __post_init__(self) -> None:
         if not config.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+            raise RuntimeError("ANTHROPIC_API_KEY no esta configurada. Agregala en el archivo .env.")
         self.client = Anthropic(api_key=config.anthropic_api_key)
 
     def chat(self, user_message: str, history: list[dict] | None = None) -> dict[str, Any]:
@@ -1916,9 +1995,13 @@ class PropensityAgent:
 --------------------------------------------------------------------------------
 # Archivo: src/agent/smoke_test.py
 --------------------------------------------------------------------------------
-"""Smoke test for the conversational agent.
+"""Prueba rapida end-to-end del agente conversacional.
 
-Run after setting ANTHROPIC_API_KEY in .env:
+Lanza 4 preguntas de negocio contra el agente y muestra las respuestas y la
+cantidad de tool calls que hizo. Util para verificar que toda la cadena
+(Claude, tools, DuckDB, Parquet) funciona despues de un cambio.
+
+Para ejecutar (requiere ANTHROPIC_API_KEY en .env):
     python -m src.agent.smoke_test
 """
 from __future__ import annotations
@@ -1939,11 +2022,11 @@ SAMPLE_QUESTIONS = [
 
 def main() -> None:
     if not config.anthropic_api_key:
-        print("ERROR: ANTHROPIC_API_KEY not set in .env")
+        print("ERROR: ANTHROPIC_API_KEY no esta configurada en .env")
         return
 
     agent = PropensityAgent()
-    print(f"Using model: {agent.model}\n")
+    print(f"Modelo en uso: {agent.model}\n")
     history: list[dict] = []
     for q in SAMPLE_QUESTIONS:
         print(f"USER  > {q}")
@@ -1965,9 +2048,14 @@ if __name__ == "__main__":
 --------------------------------------------------------------------------------
 # Archivo: src/app.py
 --------------------------------------------------------------------------------
-"""Streamlit app — chat con el agente + dashboard de predicciones.
+"""Aplicacion Streamlit del producto.
 
-Run:
+Tres vistas:
+  - Chat con el agente conversacional (preguntas en lenguaje natural).
+  - Dashboard de predicciones (KPIs y graficos por decil y segmento).
+  - Modelo (metricas de performance, hiperparametros, SHAP, calibracion).
+
+Para ejecutar:
     streamlit run src/app.py
 """
 from __future__ import annotations
@@ -1975,9 +2063,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Streamlit ejecuta este archivo como script (no como módulo), por lo que la raíz
-# del proyecto no está en sys.path y los imports `from src.X` fallarían. Esto lo
-# arregla sin importar desde dónde se invoque streamlit.
+# Streamlit ejecuta este archivo como script y no como modulo, por lo que la
+# raiz del proyecto no esta en sys.path y los imports `from src.X` fallarian.
+# Inserto la raiz manualmente para que la app funcione sin importar desde
+# donde se invoque streamlit.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -2063,7 +2152,7 @@ def page_chat() -> None:
                 with st.expander(f"🔍 {sum(1 for s in msg['trace'] if s['kind']=='tool_call')} tool call(s)"):
                     for step in msg["trace"]:
                         if step["kind"] == "tool_call":
-                            st.markdown(f"**→ {step['name']}**")
+                            st.markdown(f"**llamada a {step['name']}**")
                             st.json(step["payload"], expanded=False)
                         elif step["kind"] == "tool_result":
                             st.markdown(f"**← resultado de {step['name']}**")
@@ -2082,7 +2171,7 @@ def page_chat() -> None:
     if user_input:
         agent = get_agent()
         if agent is None:
-            st.error("Agente no inicializado — falta ANTHROPIC_API_KEY.")
+            st.error("Agente no inicializado: falta ANTHROPIC_API_KEY en el .env.")
             return
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
@@ -2187,32 +2276,102 @@ def page_modelo() -> None:
     metrics_path = Path("docs/metrics/model_metrics.json")
     if metrics_path.exists():
         m = json.loads(metrics_path.read_text())
-        c1, c2, c3, c4 = st.columns(4)
-        lgb = m["lightgbm"]["test"]
-        c1.metric("AUC-ROC (test)", f"{lgb['auc_roc']:.3f}")
-        c2.metric("PR-AUC (test)", f"{lgb['pr_auc']:.3f}")
-        c3.metric("Lift @ top 10%", f"{lgb['lift@10%']:.2f}x")
-        c4.metric("Brier score", f"{lgb['brier']:.3f}")
+        lgb_test = m["lightgbm"]["test"]
 
-        st.json(m, expanded=False)
+        # KPIs principales arriba
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("AUC-ROC (test)", f"{lgb_test['auc_roc']:.3f}")
+        c2.metric("PR-AUC (test)", f"{lgb_test['pr_auc']:.3f}")
+        c3.metric("Lift @ top 10%", f"{lgb_test['lift@10%']:.2f}x")
+        c4.metric("Brier score", f"{lgb_test['brier']:.3f}")
+
+        st.divider()
+        st.subheader("Comparativa de modelos")
+
+        # Tabla comparativa val + test, LogReg vs LightGBM
+        rows = []
+        labels = {
+            "auc_roc": "AUC-ROC",
+            "pr_auc": "PR-AUC",
+            "log_loss": "Log loss",
+            "brier": "Brier score",
+            "lift@10%": "Lift @ top 10%",
+            "lift@20%": "Lift @ top 20%",
+            "lift@30%": "Lift @ top 30%",
+        }
+        for key, label in labels.items():
+            rows.append({
+                "Métrica": label,
+                "LogReg (val)": f"{m['logreg']['val'][key]:.3f}",
+                "LogReg (test)": f"{m['logreg']['test'][key]:.3f}",
+                "LightGBM (val)": f"{m['lightgbm']['val'][key]:.3f}",
+                "LightGBM (test)": f"{m['lightgbm']['test'][key]:.3f}",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.caption("Lift @ top-K mide cuántas veces más compradores hay en el top-K% por score vs. la población general. Es la métrica que más importa para campañas dirigidas.")
+
+        # Configuración del split
+        st.divider()
+        st.subheader("Configuración del experimento")
+        split = m.get("split", {})
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Filas train", f"{split.get('n_train', 0):,}")
+        c2.metric("Filas validación", f"{split.get('n_val', 0):,}")
+        c3.metric("Filas test", f"{split.get('n_test', 0):,}")
+        st.caption(
+            f"Split temporal: train hasta día {split.get('train_days_end')}, "
+            f"validación hasta día {split.get('val_days_end')}, test el resto. "
+            f"Total de features: {m.get('feature_count', 'N/D')}."
+        )
+
+        # Hiperparametros encontrados por Optuna
+        best_params = m["lightgbm"].get("best_params", {})
+        if best_params:
+            st.divider()
+            st.subheader("Hiperparámetros optimizados (Optuna, 30 trials)")
+            param_rows = []
+            descriptions = {
+                "num_leaves": "Cantidad máxima de hojas por árbol",
+                "max_depth": "Profundidad máxima de cada árbol",
+                "learning_rate": "Tasa de aprendizaje (paso del boosting)",
+                "feature_fraction": "Fracción de features muestreadas por árbol",
+                "bagging_fraction": "Fracción de filas muestreadas por árbol",
+                "bagging_freq": "Cada cuántas iteraciones se hace bagging",
+                "min_child_samples": "Mínimo de muestras en una hoja",
+                "lambda_l1": "Regularización L1 (sparsity)",
+                "lambda_l2": "Regularización L2 (suavidad)",
+            }
+            for k, v in best_params.items():
+                val = f"{v:.4f}" if isinstance(v, float) else str(v)
+                param_rows.append({
+                    "Hiperparámetro": k,
+                    "Valor óptimo": val,
+                    "Qué controla": descriptions.get(k, ""),
+                })
+            param_rows.append({
+                "Hiperparámetro": "best_iteration",
+                "Valor óptimo": str(m["lightgbm"].get("best_iteration", "N/D")),
+                "Qué controla": "Cantidad de árboles construidos antes de early stopping",
+            })
+            st.dataframe(pd.DataFrame(param_rows), hide_index=True, use_container_width=True)
 
     st.divider()
     st.subheader("Curva de ganancia (Lift Curve)")
     img = Path("docs/model/figures/lift_curve.png")
     if img.exists():
-        st.image(str(img), use_container_width=True)
+        st.image(str(img), use_column_width=True)
 
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Importancia de features (SHAP)")
         img = Path("docs/model/figures/shap_importance.png")
         if img.exists():
-            st.image(str(img), use_container_width=True)
+            st.image(str(img), use_column_width=True)
     with col_b:
         st.subheader("Calibración")
         img = Path("docs/model/figures/calibration.png")
         if img.exists():
-            st.image(str(img), use_container_width=True)
+            st.image(str(img), use_column_width=True)
 
 
 # Router
@@ -2232,7 +2391,14 @@ elif page == "🧠 Modelo":
 # Archivo: deploy/digitalocean/app.yaml
 --------------------------------------------------------------------------------
 # DigitalOcean App Platform spec
-# Deploy: doctl apps create --spec deploy/digitalocean/app.yaml
+# Deploy CLI:  doctl apps create --spec deploy/digitalocean/app.yaml
+# Deploy UI:   https://cloud.digitalocean.com/apps/new (importar este YAML)
+#
+# Antes de desplegar:
+#   1. Reemplaza <USER>/<REPO> con tu repo de GitHub.
+#   2. Sube data/predictions/predictions.parquet al Space del paso STORAGE_BUCKET.
+#   3. Configura los secretos (STORAGE_KEY, STORAGE_SECRET, ANTHROPIC_API_KEY)
+#      desde la UI tras el primer deploy.
 name: ferreycorp-propension
 region: nyc
 
@@ -2245,7 +2411,7 @@ services:
       branch: main
       deploy_on_push: true
     instance_count: 1
-    instance_size_slug: basic-xs    # 1 vCPU, 1 GB RAM — ~$12/mo
+    instance_size_slug: basic-xs    # 1 vCPU, 1 GB RAM (alrededor de 12 USD por mes)
     http_port: 8501
     health_check:
       http_path: /_stcore/health
@@ -2267,7 +2433,7 @@ services:
       - key: ANTHROPIC_API_KEY
         type: SECRET
       - key: ANTHROPIC_MODEL
-        value: claude-sonnet-4-5
+        value: claude-sonnet-4-5-20250929
       - key: APP_ENV
         value: production
 

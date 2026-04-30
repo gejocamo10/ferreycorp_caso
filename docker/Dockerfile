@@ -1,7 +1,6 @@
-# ============================================================
-# Cloud-agnostic container — runs on DO App Platform,
-# AWS ECS / App Runner, GCP Cloud Run, or any K8s cluster.
-# ============================================================
+# Imagen del contenedor agnostica del proveedor cloud.
+# Corre en DigitalOcean App Platform, AWS ECS o App Runner, GCP Cloud Run
+# o cualquier cluster de Kubernetes sin cambios.
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,6 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# build-essential y libgomp1 son necesarios para compilar e invocar LightGBM.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgomp1 \
@@ -23,5 +23,6 @@ COPY models/ ./models/
 
 EXPOSE 8501
 
-# Streamlit entrypoint by default; override CMD for batch jobs
+# Por defecto arranca la UI de Streamlit. Para correr trabajos batch
+# (entrenar, scorear, etc.) se sobrescribe el CMD al lanzar el contenedor.
 CMD ["streamlit", "run", "src/app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

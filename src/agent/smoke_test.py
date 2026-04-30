@@ -1,6 +1,10 @@
-"""Smoke test for the conversational agent.
+"""Prueba rapida end-to-end del agente conversacional.
 
-Run after setting ANTHROPIC_API_KEY in .env:
+Lanza 4 preguntas de negocio contra el agente y muestra las respuestas y la
+cantidad de tool calls que hizo. Util para verificar que toda la cadena
+(Claude, tools, DuckDB, Parquet) funciona despues de un cambio.
+
+Para ejecutar (requiere ANTHROPIC_API_KEY en .env):
     python -m src.agent.smoke_test
 """
 from __future__ import annotations
@@ -21,11 +25,11 @@ SAMPLE_QUESTIONS = [
 
 def main() -> None:
     if not config.anthropic_api_key:
-        print("ERROR: ANTHROPIC_API_KEY not set in .env")
+        print("ERROR: ANTHROPIC_API_KEY no esta configurada en .env")
         return
 
     agent = PropensityAgent()
-    print(f"Using model: {agent.model}\n")
+    print(f"Modelo en uso: {agent.model}\n")
     history: list[dict] = []
     for q in SAMPLE_QUESTIONS:
         print(f"USER  > {q}")

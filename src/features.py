@@ -1,9 +1,11 @@
-"""Feature engineering — strictly causal features per (customer, visit_day).
+"""Construccion de features estrictamente causales por (cliente, dia de visita).
 
-All historical aggregates use only data with `dia < dia_visita_actual` (no leakage).
-Computed efficiently with groupby cumulative ops + shift, no Python loops.
+Toda agregacion historica se calcula usando unicamente datos con
+`dia < dia_visita_actual` del mismo cliente, para evitar data leakage. La
+computacion se hace con operaciones acumulativas de groupby y shift, sin
+loops de Python, lo que mantiene el tiempo bajo aun con 58 mil filas.
 
-Run:
+Para ejecutar:
     python -m src.features
 """
 from __future__ import annotations
@@ -20,10 +22,12 @@ PROCESSED_DIR = ensure_dir(PROJECT_ROOT / "data" / "processed")
 
 
 # ============================================================
-# Customer-level causal aggregates (RFM, loyalty, promo sens.)
+# Agregados causales a nivel cliente (RFM, lealtad, sensibilidad a promo)
 # ============================================================
 def add_prior_visit_aggregates(df: pd.DataFrame) -> pd.DataFrame:
-    """For each row, add aggregates computed over PRIOR visits of same customer."""
+    """Para cada fila, agrega features calculadas sobre las visitas previas
+    del mismo cliente (recencia, frecuencia, ticket promedio).
+    """
     df = df.sort_values(["id", "dia_visita"]).reset_index(drop=True).copy()
     grp = df.groupby("id", sort=False)
 
@@ -53,7 +57,10 @@ def add_prior_visit_aggregates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_brand_loyalty(df: pd.DataFrame) -> pd.DataFrame:
-    """Per (customer, brand): prior fraction of customer's purchases that went to brand b."""
+    """Para cada par (cliente, marca), calcula la fraccion historica de
+    compras de ese cliente que fueron de la marca b. Devuelve 5 columnas
+    `loyalty_b1` a `loyalty_b5` que suman 1 cuando hay historia previa.
+    """
     grp = df.groupby("id", sort=False)
     for b in BRANDS:
         bought_b = ((df["id_marca"] == b) & (df["incidencia_compra"] == 1)).astype(int)
@@ -64,7 +71,9 @@ def add_brand_loyalty(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_promo_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
-    """How much does this customer respond to promotions historically?"""
+    """Mide cuanto responde el cliente a promociones historicamente,
+    comparando su tasa de compra cuando hay promo activa contra cuando no.
+    """
     promo_cols = [f"promo_marca_{b}" for b in BRANDS]
     df["any_promo_today"] = (df[promo_cols].sum(axis=1) > 0).astype(int)
 
@@ -88,9 +97,11 @@ def add_promo_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_relative_prices(df: pd.DataFrame) -> pd.DataFrame:
-    """Today's price for each brand vs. historical average (causal).
+    """Calcula el precio actual de cada marca dividido entre el promedio
+    historico de esa marca, de forma causal (sin incluir el dia actual).
 
-    Same prices apply to all customers on a given day, so we compute at day level.
+    Como los precios son los mismos para todos los clientes en un dia dado,
+    el calculo se hace a nivel dia y luego se hace merge con las visitas.
     """
     price_cols = [f"precio_marca_{b}" for b in BRANDS]
     daily_prices = df.groupby("dia_visita")[price_cols].first().sort_index()
@@ -112,8 +123,9 @@ def add_relative_prices(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_loyal_brand_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Per row: which brand is the customer most loyal to historically? Is it on promo today?
-    Is its price below historical average?
+    """Calcula features que combinan la marca leal del cliente con el estado
+    actual del dia: si esa marca esta en promo hoy, y si su precio actual
+    esta por debajo o encima de su promedio historico.
     """
     loyalty_cols = [f"loyalty_b{b}" for b in BRANDS]
     df["loyal_brand_id"] = df[loyalty_cols].values.argmax(axis=1) + 1
@@ -132,11 +144,15 @@ def add_loyal_brand_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# Customer-level segmentation (for the AGENT to filter on)
-# Computed at end of period — used for filtering, NOT model input.
+# Segmentacion a nivel cliente para que el agente pueda filtrar por nombre
+# (Leales premium, Cazadores de oferta, etc.). Se computa sobre todo el
+# periodo y NO se usa como feature del modelo, para evitar leakage.
 # ============================================================
 def compute_customer_segments(df: pd.DataFrame, n_clusters: int = 4, seed: int = 42) -> pd.DataFrame:
-    """K-Means on customer-level RFM + demographics. Returns DataFrame with id + cluster + label."""
+    """Aplica K-Means sobre features agregadas a nivel cliente
+    (tasa de compra, total de compras, ticket promedio, edad, ingreso) y
+    devuelve un DataFrame con id, id de cluster y etiqueta legible.
+    """
     cust = (
         df.groupby("id")
         .agg(
@@ -171,7 +187,10 @@ def compute_customer_segments(df: pd.DataFrame, n_clusters: int = 4, seed: int =
 
 
 def label_clusters(stats: pd.DataFrame) -> dict[int, str]:
-    """Heuristic labels based on buy_rate + income."""
+    """Asigna etiquetas legibles a los clusters segun su tasa de compra
+    y nivel de ingreso, para que el agente pueda referirse a ellos por
+    nombre (Leales premium, Cazadores de oferta, etc.).
+    """
     labels = {}
     sorted_by_rate = stats.sort_values("avg_buy_rate", ascending=False).index.tolist()
     sorted_by_income = stats.sort_values("avg_income", ascending=False).index.tolist()

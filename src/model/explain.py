@@ -1,13 +1,13 @@
-"""Explainability + business charts for the trained LightGBM model.
+"""Explicabilidad y graficos de negocio sobre el modelo LightGBM entrenado.
 
-Generates:
-  - SHAP global importance (bar) and beeswarm
-  - Lift curve (cumulative gain)
-  - Calibration plot
-  - Confusion matrix at chosen threshold
-  - Top-K targeting table (CSV)
+Genera:
+  - Importancia global de features con SHAP (bar plot y beeswarm)
+  - Curva de ganancia acumulada (lift curve)
+  - Grafico de calibracion (probabilidad predicha vs. tasa real)
+  - Matriz de confusion a un umbral elegido
+  - Tabla de deciles para targeting (CSV)
 
-Run:
+Para ejecutar:
     python -m src.model.explain
 """
 from __future__ import annotations
@@ -71,7 +71,7 @@ def fig_lift_curve(y_true: np.ndarray, y_proba: np.ndarray) -> pd.DataFrame:
         idx = int(np.ceil(len(df) * k / 100)) - 1
         captured = df.loc[idx, "pct_positives_captured"]
         ax.scatter([k], [captured], color="#e76f51", zorder=5)
-        ax.annotate(f"  Top {k}% → {captured:.0f}% compras", (k, captured), fontsize=9)
+        ax.annotate(f"  Top {k}% captura {captured:.0f}% de compras", (k, captured), fontsize=9)
     ax.legend(loc="lower right")
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -126,7 +126,7 @@ def fig_confusion(y_true: np.ndarray, y_proba: np.ndarray, threshold: float = 0.
 
 
 def main() -> None:
-    print("Loading model + data...")
+    print("Cargando modelo y datos...")
     booster = lgb.Booster(model_file=str(MODELS_DIR / "lgbm_propensity.txt"))
     df = pd.read_parquet(PROCESSED / "features.parquet")
     _, _, test = temporal_split(df)
@@ -136,19 +136,19 @@ def main() -> None:
 
     proba = booster.predict(X_test)
 
-    print("Generating SHAP plots (sample of 3000)...")
+    print("Generando graficos SHAP (muestra de 3000 filas)...")
     sample = X_test.sample(min(3000, len(X_test)), random_state=42)
     fig_shap(booster, sample)
 
-    print("Generating lift curve...")
+    print("Generando curva de ganancia (lift)...")
     decile_table = fig_lift_curve(y_test, proba)
     decile_table.to_csv(PROJECT_ROOT / "docs" / "model" / "deciles.csv")
     print(decile_table.round(3))
 
-    print("Generating calibration plot...")
+    print("Generando grafico de calibracion...")
     fig_calibration(y_test, proba)
 
-    print("Generating confusion matrix...")
+    print("Generando matriz de confusion...")
     cm_metrics = fig_confusion(y_test, proba, threshold=0.5)
     print(f"  precision={cm_metrics['precision']:.3f}  recall={cm_metrics['recall']:.3f}")
 
@@ -162,7 +162,7 @@ def main() -> None:
     (PROJECT_ROOT / "docs" / "model" / "explainability_summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
-    print("\nDone. Figures at docs/model/figures/")
+    print("\nListo. Figuras generadas en docs/model/figures/")
 
 
 if __name__ == "__main__":

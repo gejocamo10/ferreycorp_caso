@@ -1,7 +1,10 @@
-"""Centralized configuration loaded from environment variables.
+"""Configuracion centralizada del proyecto, leida desde variables de entorno.
 
-Switching cloud providers (DigitalOcean, AWS, GCP) only requires changing
-env vars, never application code.
+Toda la configuracion vive aqui (proveedor cloud, credenciales, paths,
+modelo de Claude). El resto del codigo solo importa la instancia `config`.
+
+Cambiar de DigitalOcean a AWS o GCP no requiere tocar codigo, solo se
+ajustan variables en el archivo .env.
 """
 from __future__ import annotations
 
@@ -13,10 +16,10 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Carga explicita del .env desde la raiz del proyecto para que funcione sin
-# importar el cwd (Streamlit, scripts, tests, contenedores).
-# override=True para que el .env del proyecto gane sobre variables vacias
-# heredadas del shell.
+# Cargo el .env con path absoluto para que funcione sin importar desde donde
+# se invoque el codigo (Streamlit, scripts, tests o contenedores).
+# Uso override=True para que las variables del .env del proyecto tengan
+# prioridad sobre variables vacias heredadas del shell del usuario.
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 

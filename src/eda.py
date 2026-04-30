@@ -1,6 +1,11 @@
-"""Exploratory Data Analysis: generates figures and a markdown report.
+"""Analisis exploratorio de datos.
 
-Run from project root:
+Genera 11 figuras y un reporte en markdown que documentan el dataset crudo
+(distribuciones, balance del target, lealtad por marca, sensibilidad a promo,
+correlaciones, etc.). El reporte sirve como insumo para tomar decisiones de
+modelado: que features construir, que tipo de modelo elegir y como evaluar.
+
+Para ejecutar desde la raiz del proyecto:
     python -m src.eda
 """
 from __future__ import annotations
@@ -192,7 +197,8 @@ def fig_loyalty(df: pd.DataFrame) -> None:
     fig.savefig(FIG_DIR / "11_loyalty.png", dpi=120)
     plt.close(fig)
 
-    # Concentration: how many customers buy >50% from a single brand?
+    # Concentracion: que fraccion de clientes concentran mas del 50% de
+    # sus compras en una sola marca (mide lealtad de marca a nivel poblacional).
     top_share = loyalty_pct.max(axis=1)
     concentrated = (top_share > 0.5).mean()
     return concentrated

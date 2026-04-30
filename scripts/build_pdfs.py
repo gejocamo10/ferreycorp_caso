@@ -1,4 +1,8 @@
-"""Convert the markdown deliverables to PDF using xhtml2pdf (pure-Python)."""
+"""Convierte los entregables en markdown a PDF usando xhtml2pdf (puro Python).
+
+Genera DOCUMENTO_TECNICO.pdf, GUIA_APRENDIZAJE.pdf y REPORTE_EDA.pdf.
+SLIDES.pdf se genera con build_slides_pdf.py por usar formato landscape.
+"""
 from __future__ import annotations
 
 import sys

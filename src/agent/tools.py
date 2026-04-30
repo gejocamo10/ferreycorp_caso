@@ -1,11 +1,11 @@
-"""DuckDB-backed query tools the agent can call.
+"""Herramientas que el agente puede llamar, ejecutadas con DuckDB sobre el Parquet.
 
-Architecture decision: instead of text-to-SQL (risky, can produce invalid/dangerous
-SQL), the LLM emits a structured filter object that we translate to parameterized
-SQL. Safer, predictable, easier to test.
+Decision de diseño: en vez de exponer text-to-SQL (riesgoso, puede generar SQL
+invalido o peligroso), el LLM emite un objeto de filtros estructurado que el
+backend traduce a SQL parametrizado. Es mas seguro, predecible y facil de testear.
 
-The Parquet file is read by DuckDB on every query — at this volume (~60k rows)
-queries return in <100ms even from cloud object storage.
+DuckDB lee el Parquet en cada consulta. Para este volumen (alrededor de 60 mil filas)
+las consultas devuelven en menos de 100 ms incluso leyendo desde object storage en la nube.
 """
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ import pandas as pd
 from src.config import PROJECT_ROOT, config
 from src.storage.object_storage import storage
 
-# Allowed columns and operators — strict whitelist prevents SQL injection
+# Whitelist estricta de columnas y operadores. Cualquier valor que no este
+# aqui se rechaza antes de tocar SQL, lo que previene inyeccion.
 ALLOWED_COLUMNS: dict[str, str] = {
     "id": "INTEGER",
     "dia_visita": "INTEGER",
@@ -48,7 +49,7 @@ ALLOWED_SORT_DIR = {"asc", "desc"}
 
 
 # ============================================================
-# Connection / data loading
+# Conexion y carga de datos
 # ============================================================
 def _predictions_uri() -> str:
     if config.cloud_provider == "local":
@@ -63,7 +64,7 @@ def get_conn() -> duckdb.DuckDBPyConnection:
 
 
 # ============================================================
-# Filter language → SQL
+# Traduccion del lenguaje de filtros estructurados a SQL parametrizado
 # ============================================================
 def _build_where(filters: list[dict[str, Any]]) -> tuple[str, list[Any]]:
     if not filters:
@@ -75,18 +76,18 @@ def _build_where(filters: list[dict[str, Any]]) -> tuple[str, list[Any]]:
         op = f.get("operator", "=").upper()
         val = f.get("value")
         if col not in ALLOWED_COLUMNS:
-            raise ValueError(f"Column not allowed: {col}")
+            raise ValueError(f"Columna no permitida: {col}")
         if op not in ALLOWED_OPERATORS:
-            raise ValueError(f"Operator not allowed: {op}")
+            raise ValueError(f"Operador no permitido: {op}")
         if op == "IN":
             if not isinstance(val, list) or not val:
-                raise ValueError("IN requires a non-empty list value")
+                raise ValueError("El operador IN requiere una lista no vacia como valor")
             placeholders = ",".join(["?"] * len(val))
             clauses.append(f"{col} IN ({placeholders})")
             params.extend(val)
         elif op == "BETWEEN":
             if not isinstance(val, list) or len(val) != 2:
-                raise ValueError("BETWEEN requires a [low, high] list")
+                raise ValueError("El operador BETWEEN requiere una lista [min, max]")
             clauses.append(f"{col} BETWEEN ? AND ?")
             params.extend(val)
         else:
@@ -103,15 +104,15 @@ def _build_order(order_by: list[dict[str, str]] | None) -> str:
         col = ob.get("column")
         direction = ob.get("direction", "desc").lower()
         if col not in ALLOWED_COLUMNS:
-            raise ValueError(f"Order column not allowed: {col}")
+            raise ValueError(f"Columna de ordenamiento no permitida: {col}")
         if direction not in ALLOWED_SORT_DIR:
-            raise ValueError(f"Order direction not allowed: {direction}")
+            raise ValueError(f"Direccion de ordenamiento no permitida: {direction}")
         parts.append(f"{col} {direction}")
     return " ORDER BY " + ", ".join(parts)
 
 
 # ============================================================
-# Public tool functions (called by the agent via tool use)
+# Funciones publicas que el agente puede invocar via tool use
 # ============================================================
 def query_predictions(
     filters: list[dict[str, Any]] | None = None,
@@ -119,11 +120,14 @@ def query_predictions(
     limit: int = 50,
     columns: list[str] | None = None,
 ) -> dict[str, Any]:
-    """List individual customer-day predictions matching the filters."""
+    """Lista filas individuales de predicciones (cliente y dia) que cumplen
+    los filtros indicados. Util para preguntas tipo "dame los 50 clientes
+    con mayor score que sean de Leales premium".
+    """
     cols = columns or list(ALLOWED_COLUMNS.keys())
     for c in cols:
         if c not in ALLOWED_COLUMNS:
-            raise ValueError(f"Column not allowed: {c}")
+            raise ValueError(f"Columna no permitida: {c}")
     where_sql, params = _build_where(filters or [])
     order_sql = _build_order(order_by)
     limit = max(1, min(int(limit), 500))
@@ -146,7 +150,10 @@ def aggregate_predictions(
     order_by: list[dict[str, str]] | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
-    """Group + aggregate the predictions table (e.g., avg score by cluster)."""
+    """Agrupa y agrega la tabla de predicciones para responder preguntas tipo
+    "score promedio por segmento" o "cuantos clientes hay en el decil top
+    con promo activa".
+    """
     if aggregations is None:
         aggregations = [{"function": "count", "column": "id", "alias": "n"},
                         {"function": "avg", "column": "score_compra", "alias": "avg_score"}]
@@ -154,16 +161,16 @@ def aggregate_predictions(
     if group_by:
         for g in group_by:
             if g not in ALLOWED_COLUMNS:
-                raise ValueError(f"Group column not allowed: {g}")
+                raise ValueError(f"Columna de agrupacion no permitida: {g}")
             select_parts.append(g)
     for agg in aggregations:
         fn = agg.get("function", "count").lower()
         col = agg.get("column", "id")
         alias = agg.get("alias", f"{fn}_{col}")
         if fn not in ALLOWED_AGG:
-            raise ValueError(f"Agg function not allowed: {fn}")
+            raise ValueError(f"Funcion de agregacion no permitida: {fn}")
         if col not in ALLOWED_COLUMNS:
-            raise ValueError(f"Agg column not allowed: {col}")
+            raise ValueError(f"Columna de agregacion no permitida: {col}")
         if fn == "count":
             select_parts.append(f"COUNT({col}) AS {alias}")
         else:
@@ -182,7 +189,9 @@ def aggregate_predictions(
 
 
 def schema_info() -> dict[str, Any]:
-    """Return the available columns + their meaning so the LLM picks valid ones."""
+    """Devuelve la lista de columnas disponibles con su descripcion. El agente
+    puede llamar esta funcion cuando duda de que columna usar para un filtro.
+    """
     descriptions = {
         "id": "ID del cliente (500 únicos).",
         "dia_visita": "Día de la visita (1-730, ~2 años de datos).",
@@ -202,6 +211,6 @@ def schema_info() -> dict[str, Any]:
         "prior_buy_rate": "Tasa de compra histórica del cliente (0-1).",
         "recency_days": "Días desde la última compra del cliente (-1 si nunca).",
         "any_promo_today": "1 si al menos una marca está en promo ese día, 0 si no.",
-        "incidencia_compra": "Variable real (0/1) — útil para validar el modelo, no para predecir.",
+        "incidencia_compra": "Variable real (0 o 1). Util para validar el modelo, no para predecir.",
     }
     return {"columns": descriptions}
